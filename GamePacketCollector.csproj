@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsUraPlugin>true</IsUraPlugin>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Version>0.2.0</Version>
+
+    <!-- URA 插件元数据:由仓库根 build targets 用来生成 manifest.json -->
+    <PluginInternalName>GamePacketCollector</PluginInternalName>
+    <PluginDisplayName>游戏包采集</PluginDisplayName>
+    <PluginAuthor>URA</PluginAuthor>
+    <PluginDescription>捕获高价值游戏 request-response raw 包并上传到 URACloud GamePackets。</PluginDescription>
+    <PluginChangelog>将 request/response 配成完整 exchange,写入 pending outbox 并上传到 URACloud GamePackets。</PluginChangelog>
+    <PluginRepositoryUrl>https://github.com/URA-Plugins/GamePacketCollector</PluginRepositoryUrl>
+    <PluginCategory>数据采集</PluginCategory>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
+
+</Project>
