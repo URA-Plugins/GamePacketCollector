@@ -1,4 +1,5 @@
 using Gallop.Endpoints;
+using UmamusumeResponseAnalyzer.Plugin;
 
 namespace GamePacketCollector.Capture;
 
@@ -260,6 +261,36 @@ public static class PacketCaptureCatalog
         ..Resolve("race", RaceEndpointPaths),
         ..Resolve("gacha", GachaEndpointPaths),
     ];
+
+    public static IReadOnlyList<EndpointPattern> BuildPatterns(
+        IReadOnlyList<PacketCaptureEndpoint> endpoints)
+    {
+        var remaining = endpoints.Select(endpoint => endpoint.Path)
+            .ToHashSet(StringComparer.Ordinal);
+        List<EndpointPattern> patterns = [];
+        foreach (var action in SingleModeSharedActionNames)
+        {
+            var matching = GameEndpointCatalog.ByPath.Keys
+                .Where(path => IsSingleModeAction(path, action))
+                .ToArray();
+            if (matching.Length == 0 || matching.Any(path => !remaining.Contains(path)))
+                continue;
+
+            patterns.Add(EndpointPattern.Wildcard($"/umamusume/single_mode*/{action}"));
+            remaining.ExceptWith(matching);
+        }
+
+        patterns.AddRange(remaining.Order(StringComparer.Ordinal).Select(EndpointPattern.Exact));
+        return patterns;
+    }
+
+    static bool IsSingleModeAction(string path, string action)
+    {
+        var segments = path.Split('/');
+        return segments is ["", "umamusume", var scenario, var endpointAction] &&
+               scenario.StartsWith("single_mode", StringComparison.Ordinal) &&
+               string.Equals(endpointAction, action, StringComparison.Ordinal);
+    }
 
     static IEnumerable<string> BuildSingleModeEndpointPaths(IEnumerable<string> scenarios, IEnumerable<string> actions)
     {

@@ -19,6 +19,7 @@
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
+    <PackageReference Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 
 </Project>

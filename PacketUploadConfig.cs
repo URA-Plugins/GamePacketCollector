@@ -12,25 +12,20 @@ public sealed class PacketUploadConfig
     public bool Enabled { get; set; }
     public string[] EndpointGroups { get; set; } = [SingleModeEndpointGroup];
 
-    public static PacketUploadConfig LoadOrCreate(
-        string path,
-        JsonSerializerOptions jsonOptions,
-        Func<PacketUploadConfig>? createConfig = null)
+    public static PacketUploadConfig Load(string path, JsonSerializerOptions jsonOptions)
     {
-        if (File.Exists(path))
-        {
-            var loaded = JsonSerializer.Deserialize<PacketUploadConfig>(File.ReadAllText(path), jsonOptions);
-            if (loaded is null)
-                throw new InvalidOperationException($"Invalid GamePacketCollector config: {path}");
+        var loaded = JsonSerializer.Deserialize<PacketUploadConfig>(File.ReadAllText(path), jsonOptions);
+        if (loaded is null)
+            throw new InvalidOperationException($"Invalid GamePacketCollector config: {path}");
 
-            Validate(loaded, path);
-            return loaded;
-        }
+        Validate(loaded, path);
+        return loaded;
+    }
 
-        var config = createConfig?.Invoke() ?? new PacketUploadConfig();
-        Validate(config, path);
-        File.WriteAllText(path, JsonSerializer.Serialize(config, jsonOptions));
-        return config;
+    public void Save(string path, JsonSerializerOptions jsonOptions)
+    {
+        Validate(this, path);
+        File.WriteAllText(path, JsonSerializer.Serialize(this, jsonOptions));
     }
 
     static void Validate(PacketUploadConfig config, string path)

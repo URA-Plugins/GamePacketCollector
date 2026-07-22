@@ -1,9 +1,10 @@
-using System.Reflection;
 using System.Threading.Channels;
 using System.Text.Json;
-using Spectre.Console;
+using Terminal.Gui.App;
+using Terminal.Gui.ViewBase;
+using Terminal.Gui.Views;
 using GamePacketCollector.Capture;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using UmamusumeResponseAnalyzer.TerminalGui;
 using UmamusumeResponseAnalyzer.Plugin;
 
 namespace GamePacketCollector;
@@ -14,8 +15,6 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
 
     static readonly TimeSpan RetriableUploadRetryDelay = TimeSpan.FromSeconds(10);
     static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    static readonly MethodInfo RegisterRequestMethod = ResolveRawRegistrationMethod(nameof(IPluginAnalyzerRegistry.RegisterRequest));
-    static readonly MethodInfo RegisterResponseMethod = ResolveRawRegistrationMethod(nameof(IPluginAnalyzerRegistry.RegisterResponse));
     static readonly EndpointGroupOption[] OptionalEndpointGroupOptions =
     [
         new("gacha", "抽卡结果 (Gacha)"),
@@ -23,93 +22,263 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         new("race", "比赛与结果 (Race)"),
     ];
 
-    readonly object pendingFileGate = new();
-    readonly List<IDisposable> analyzerRegistrations = [];
     readonly Channel<string> uploadQueue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
     {
         SingleReader = true,
         SingleWriter = false,
     });
-    readonly CancellationTokenSource uploadCts = new();
 
     PacketUploadConfig uploadConfig = new();
     PacketExchangeBuffer? exchangeBuffer;
+    IReadOnlyDictionary<string, PacketCaptureEndpoint>? captureEndpointsByPath;
     PacketUploader? uploader;
     HttpClient? httpClient;
-    Task? uploaderTask;
-    bool disposed;
+    int permanentUploadFailureNotified;
     string pendingDirectory = string.Empty;
     string failedDirectory = string.Empty;
 
-    public string Name => "游戏包采集";
-
-    public string Author => "URA";
-
-    public string[] Targets => [];
-
-    string DataDirectory => Path.Combine("PluginData", Name);
+    static string DataDirectory => Path.Combine("PluginData", "游戏包采集");
+    string ConfigPath => Path.Combine(DataDirectory, "config.json");
 
     public void Initialize(IPluginContext context)
     {
+        if (!File.Exists(ConfigPath))
+        {
+            context.Events.OnStarted(
+                cancellationToken => ConfigureFirstRunAsync(context, cancellationToken));
+            TerminalUi.Log(
+                "GamePacketCollector",
+                $"GamePacketCollector 尚未配置；启动后将显示首次配置。配置文件: {ConfigPath}",
+                UiSeverity.Info);
+            return;
+        }
+
+        uploadConfig = PacketUploadConfig.Load(ConfigPath, JsonOptions);
+        TerminalUi.Log("GamePacketCollector", Activate(context), UiSeverity.Info);
+    }
+
+    public async Task ConfigPromptAsync(IApplication application, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(application);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (application.TopRunnable is null &&
+            Environment.CurrentManagedThreadId != application.MainThreadId)
+            throw new InvalidOperationException(
+                "GamePacketCollector 无法从非 UI thread 启动配置：Terminal.Gui 当前没有正在运行的 session。");
+
+        var isFirstRun = !File.Exists(ConfigPath);
+        var draft = !isFirstRun
+            ? PacketUploadConfig.Load(ConfigPath, JsonOptions)
+            : new PacketUploadConfig();
+
+        PacketUploadConfig savedConfig;
+        if (Environment.CurrentManagedThreadId == application.MainThreadId)
+        {
+            savedConfig = RunConfigDialog(application, draft, isFirstRun, cancellationToken);
+        }
+        else
+        {
+            var completion = new TaskCompletionSource<PacketUploadConfig>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            application.Invoke(() =>
+            {
+                try
+                {
+                    completion.SetResult(RunConfigDialog(application, draft, isFirstRun, cancellationToken));
+                }
+                catch (Exception ex)
+                {
+                    completion.SetException(ex);
+                }
+            });
+            savedConfig = await completion.Task;
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(DataDirectory);
+        savedConfig.Save(ConfigPath, JsonOptions);
+    }
+
+    static PacketUploadConfig RunConfigDialog(
+        IApplication application,
+        PacketUploadConfig draft,
+        bool isFirstRun,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var dialog = new Dialog
+        {
+            Title = isFirstRun ? "GamePacketCollector 首次配置" : "GamePacketCollector 配置",
+            Width = 90,
+            Height = 18,
+        };
+        dialog.Add(new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Height = 5,
+            Text = "上传内容: 完整 request/response 原包，包含 ViewerId 等真实账号标识。\n"
+                 + "用途: 统计育成事件效果、事件成功率、剧本特性和其它游戏机制。\n"
+                 + "数据不会分享给第三方。",
+        });
+        var consent = new CheckBox
+        {
+            Text = "允许不匿名上传游戏数据包到 URACloud",
+            Value = draft.Enabled ? CheckState.Checked : CheckState.UnChecked,
+            CanFocus = false,
+        };
+        var singleMode = new CheckBox
+        {
+            Text = "育成数据 (SingleMode*)（启用上传时必选）",
+            Value = CheckState.Checked,
+            Enabled = false,
+            CanFocus = false,
+        };
+        var selectedGroups = draft.EndpointGroups.ToHashSet(StringComparer.Ordinal);
+        var optional = OptionalEndpointGroupOptions
+            .Select(option => new
+            {
+                Option = option,
+                CheckBox = new CheckBox
+                {
+                    Text = option.Label,
+                    Value = selectedGroups.Contains(option.Group) ? CheckState.Checked : CheckState.UnChecked,
+                    Enabled = draft.Enabled,
+                    CanFocus = false,
+                },
+            })
+            .ToArray();
+        var consentItem = new MenuItem { CommandView = consent };
+        var singleModeItem = new MenuItem { CommandView = singleMode, Enabled = false };
+        var optionalItems = optional
+            .Select(item => new MenuItem
+            {
+                CommandView = item.CheckBox,
+                Enabled = draft.Enabled,
+            })
+            .ToArray();
+        consent.ValueChanged += (_, _) =>
+        {
+            var enabled = consent.Value == CheckState.Checked;
+            foreach (var (item, menuItem) in optional.Zip(optionalItems))
+            {
+                item.CheckBox.Enabled = enabled;
+                menuItem.Enabled = enabled;
+            }
+        };
+
+        var accepted = false;
+        var save = new MenuItem("保存", action: () =>
+        {
+            accepted = true;
+            application.RequestStop(dialog);
+        });
+        var cancel = new MenuItem("取消", action: () => application.RequestStop(dialog));
+        var menu = new Menu([consentItem, singleModeItem, ..optionalItems, save, cancel])
+        {
+            X = 0,
+            Y = 6,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+        };
+        dialog.Add(menu);
+        consentItem.SetFocus();
+
+        using (cancellationToken.Register(
+                   () => application.Invoke(() => application.RequestStop(dialog))))
+            application.Run(dialog);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!accepted)
+            throw new OperationCanceledException("GamePacketCollector 配置已取消。", cancellationToken);
+
+        var enabledUpload = consent.Value == CheckState.Checked;
+        return new()
+        {
+            UploadUrl = draft.UploadUrl,
+            ServerRegionHint = draft.ServerRegionHint,
+            Enabled = enabledUpload,
+            EndpointGroups =
+            [
+                PacketUploadConfig.SingleModeEndpointGroup,
+                ..(enabledUpload
+                    ? optional.Where(x => x.CheckBox.Value == CheckState.Checked).Select(x => x.Option.Group)
+                    : []),
+            ],
+        };
+    }
+
+    async ValueTask ConfigureFirstRunAsync(IPluginContext context, CancellationToken cancellationToken)
+    {
         try
         {
-            var dataDirectory = DataDirectory;
-            Directory.CreateDirectory(dataDirectory);
-            var configPath = Path.Combine(dataDirectory, "config.json");
-            uploadConfig = PacketUploadConfig.LoadOrCreate(configPath, JsonOptions, CreateFirstRunConfig);
-
-            var workspace = context.LiveDisplay.CreateWorkspace(Name);
-            if (!uploadConfig.Enabled)
+            try
             {
-                context.LiveDisplay.Log(
-                    workspace,
-                    $"GamePacketCollector 上传未启用，未注册 raw analyzer。配置文件: {configPath}",
-                    LiveDisplaySeverity.Info);
+                await ConfigPromptAsync(context.Application, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return;
+
+                TerminalUi.Log(
+                    "GamePacketCollector",
+                    "GamePacketCollector 首次配置已取消；未写入配置，也未注册 analyzer。",
+                    UiSeverity.Info);
                 return;
             }
 
-            var captureEndpoints = ResolveCaptureEndpoints(uploadConfig);
-            pendingDirectory = Path.Combine(dataDirectory, "pending");
-            failedDirectory = Path.Combine(dataDirectory, "failed");
-            Directory.CreateDirectory(pendingDirectory);
-            Directory.CreateDirectory(failedDirectory);
-
-            exchangeBuffer = new();
-            StartUploader();
-            RegisterAnalyzers(context.Analyzers, captureEndpoints);
-
-            context.LiveDisplay.Log(
-                workspace,
-                $"GamePacketCollector 已注册 {captureEndpoints.Count} 个端点的 raw request/response 采集，上传到 {uploadConfig.UploadUrl}，pending 目录: {pendingDirectory}",
-                LiveDisplaySeverity.Info);
+            uploadConfig = PacketUploadConfig.Load(ConfigPath, JsonOptions);
+            var activationMessage = Activate(context);
+            TerminalUi.Log("GamePacketCollector", activationMessage, UiSeverity.Info);
         }
-        catch
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            Dispose();
-            throw;
         }
     }
 
-    public Task UpdatePlugin(ProgressContext ctx) => Task.CompletedTask;
+    string Activate(IPluginContext context)
+    {
+        if (!uploadConfig.Enabled)
+            return $"GamePacketCollector 上传未启用，未注册 raw analyzer。配置文件: {ConfigPath}";
+
+        var captureEndpoints = ResolveCaptureEndpoints(uploadConfig);
+        pendingDirectory = Path.Combine(DataDirectory, "pending");
+        failedDirectory = Path.Combine(DataDirectory, "failed");
+        Directory.CreateDirectory(pendingDirectory);
+        Directory.CreateDirectory(failedDirectory);
+
+        exchangeBuffer = new();
+        captureEndpointsByPath = captureEndpoints.ToDictionary(endpoint => endpoint.Path, StringComparer.Ordinal);
+        RegisterAnalyzers(context.Analyzers, captureEndpoints);
+        StartUploader(context);
+
+        return $"GamePacketCollector 已注册 {captureEndpoints.Count} 个端点的 raw request/response 采集，上传到 {uploadConfig.UploadUrl}，pending 目录: {pendingDirectory}";
+    }
 
     public void Dispose()
     {
-        if (disposed)
-            return;
+        var cleanupExceptions = new List<Exception>();
+        void Capture(Action cleanup)
+        {
+            try
+            {
+                cleanup();
+            }
+            catch (Exception ex)
+            {
+                cleanupExceptions.Add(ex);
+            }
+        }
 
-        disposed = true;
-        DisposeAnalyzerRegistrations(analyzerRegistrations);
-        analyzerRegistrations.Clear();
+        Capture(() => uploadQueue.Writer.TryComplete());
+        Capture(() => httpClient?.Dispose());
 
-        uploadQueue.Writer.TryComplete();
-        uploadCts.Cancel();
-        try { uploaderTask?.Wait(TimeSpan.FromSeconds(2)); }
-        catch { }
-        httpClient?.Dispose();
-        uploadCts.Dispose();
+        if (cleanupExceptions.Count > 0)
+            throw new AggregateException(cleanupExceptions);
     }
 
-    ValueTask CaptureRequest(PacketCaptureEndpoint endpoint, byte[] msgpack, GameHttpHeaders headers)
+    ValueTask CaptureRequest(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> msgpack, GameHttpHeaders headers)
     {
         try
         {
@@ -120,16 +289,15 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         }
         catch (Exception ex)
         {
-            AnsiConsole.WriteException(ex);
+            LogCallbackException(ex);
 #if DEBUG
             throw;
 #endif
         }
-
         return ValueTask.CompletedTask;
     }
 
-    ValueTask CaptureResponse(PacketCaptureEndpoint endpoint, byte[] msgpack, GameHttpHeaders _)
+    ValueTask CaptureResponse(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> msgpack)
     {
         try
         {
@@ -142,12 +310,11 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         }
         catch (Exception ex)
         {
-            AnsiConsole.WriteException(ex);
+            LogCallbackException(ex);
 #if DEBUG
             throw;
 #endif
         }
-
         return ValueTask.CompletedTask;
     }
 
@@ -156,14 +323,24 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         var envelope = PacketUploadEnvelope.FromExchange(exchange, uploadConfig.ServerRegionHint);
         var json = JsonSerializer.Serialize(envelope, JsonOptions);
         var file = Path.Combine(pendingDirectory, $"{exchange.PacketIdemKey}.json");
+        var tempFile = Path.Combine(
+            pendingDirectory,
+            $".{exchange.PacketIdemKey}.{Guid.NewGuid():N}.tmp");
 
-        lock (pendingFileGate)
-            File.WriteAllText(file, json);
+        try
+        {
+            File.WriteAllText(tempFile, json);
+            File.Move(tempFile, file, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(tempFile);
+        }
 
         uploadQueue.Writer.TryWrite(file);
     }
 
-    void StartUploader()
+    void StartUploader(IPluginContext context)
     {
         httpClient = new()
         {
@@ -171,10 +348,11 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         };
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"GamePacketCollector/{PluginVersion()}");
         uploader = new(httpClient, uploadConfig.UploadUrl);
-        uploaderTask = Task.Run(() => UploadLoop(uploadCts.Token));
 
         foreach (var file in Directory.GetFiles(pendingDirectory, "*.json", SearchOption.TopDirectoryOnly))
             uploadQueue.Writer.TryWrite(file);
+
+        context.RunBackground(cancellationToken => new(UploadLoop(cancellationToken)));
     }
 
     async Task UploadLoop(CancellationToken cancellationToken)
@@ -184,7 +362,7 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
             await foreach (var file in uploadQueue.Reader.ReadAllAsync(cancellationToken))
                 await TryUploadFile(file, cancellationToken);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 
     async Task TryUploadFile(string file, CancellationToken cancellationToken)
@@ -200,15 +378,22 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
             DeleteUploadedPendingFile(file);
             await PaceNextUpload(fileSize, cancellationToken);
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         catch (PacketUploadException ex) when (!ex.IsRetriable)
         {
-            AnsiConsole.WriteException(ex);
-            MoveToFailed(file);
+            LogUploaderException(ex);
+            MoveToDatedDirectory(file, failedDirectory);
+            if (Interlocked.Exchange(ref permanentUploadFailureNotified, 1) == 0)
+            {
+                TerminalUi.Notify(
+                    "GamePacketCollector",
+                    $"上传失败，数据已移入 failed 目录：{ex.Message}",
+                    UiSeverity.Error);
+            }
         }
         catch (Exception ex)
         {
-            AnsiConsole.WriteException(ex);
+            LogUploaderException(ex);
             if (!uploadQueue.Writer.TryWrite(file))
                 return;
 
@@ -226,10 +411,7 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         await Task.Delay(delay, cancellationToken);
     }
 
-
-    void MoveToFailed(string file) => MoveToDatedDirectory(file, failedDirectory);
-
-    static void DeleteUploadedPendingFile(string file)
+    void DeleteUploadedPendingFile(string file)
     {
         try
         {
@@ -237,7 +419,7 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         }
         catch (Exception ex)
         {
-            AnsiConsole.WriteException(ex);
+            LogUploaderException(ex);
         }
     }
     static void MoveToDatedDirectory(string file, string targetRoot)
@@ -247,35 +429,26 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         File.Move(file, Path.Combine(dayDirectory, Path.GetFileName(file)), overwrite: true);
     }
 
-    void RegisterAnalyzers(IPluginAnalyzerRegistry registry, IReadOnlyList<PacketCaptureEndpoint> captureEndpoints)
-    {
-        var registrations = new List<IDisposable>(captureEndpoints.Count * 2);
-        try
-        {
-            foreach (var endpoint in captureEndpoints)
-            {
-                registrations.Add(RegisterAnalyzer(registry, RegisterRequestMethod, endpoint, CaptureRequest));
-                registrations.Add(RegisterAnalyzer(registry, RegisterResponseMethod, endpoint, CaptureResponse));
-            }
-
-            analyzerRegistrations.AddRange(registrations);
-        }
-        catch
-        {
-            DisposeAnalyzerRegistrations(registrations);
-            throw;
-        }
-    }
-
-    IDisposable RegisterAnalyzer(
+    void RegisterAnalyzers(
         IPluginAnalyzerRegistry registry,
-        MethodInfo registrationMethod,
-        PacketCaptureEndpoint endpoint,
-        Func<PacketCaptureEndpoint, byte[], GameHttpHeaders, ValueTask> capture)
+        IReadOnlyList<PacketCaptureEndpoint> captureEndpoints)
     {
-        var closedMethod = registrationMethod.MakeGenericMethod(endpoint.EndpointType);
-        Func<byte[], GameHttpHeaders, ValueTask> handler = (payload, headers) => capture(endpoint, payload, headers);
-        return (IDisposable)closedMethod.Invoke(registry, [handler, 0])!;
+        var patterns = PacketCaptureCatalog.BuildPatterns(captureEndpoints);
+        var byPath = captureEndpointsByPath
+                     ?? throw new InvalidOperationException("GamePacketCollector capture endpoint map is missing.");
+        registry.Register<ReadOnlyMemory<byte>>(
+            AnalyzerKind.Request,
+            patterns,
+            invocation => CaptureRequest(
+                byPath[invocation.Endpoint.Path],
+                invocation.Payload,
+                invocation.Headers));
+        registry.Register<ReadOnlyMemory<byte>>(
+            AnalyzerKind.Response,
+            patterns,
+            invocation => CaptureResponse(
+                byPath[invocation.Endpoint.Path],
+                invocation.Payload));
     }
 
     static IReadOnlyList<PacketCaptureEndpoint> ResolveCaptureEndpoints(PacketUploadConfig config)
@@ -297,71 +470,15 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
             .ToArray();
     }
 
-    static PacketUploadConfig CreateFirstRunConfig()
-    {
-        var consent = LiveDisplayConsole.Prompt(
-            new SelectionPrompt<string>()
-                .Title("""
-是否允许 GamePacketCollector 不匿名上传游戏数据包到 URACloud？
+    void LogCallbackException(Exception exception)
+        => TerminalUi.Log("GamePacketCollector", exception.ToString(), UiSeverity.Error);
 
-上传内容: 完整 request/response 原包,包含 ViewerId 等真实账号标识。
-用途: 统计育成事件效果、事件成功率、剧本特性和其它游戏机制。
-数据不会分享给第三方。
-""")
-                .AddChoices(["否", "否", "是"])) == "是";
-
-        if (!consent)
-            return new PacketUploadConfig
-            {
-                Enabled = false,
-                EndpointGroups = [PacketUploadConfig.SingleModeEndpointGroup],
-            };
-
-        LiveDisplayConsole.WriteLine("必选: 育成数据 (SingleMode*)。用于统计育成事件效果、事件成功率、剧本特性等。");
-        var selectedOptionalLabels = LiveDisplayConsole.Prompt(
-            new MultiSelectionPrompt<string>()
-                .Title("还要上传哪些可选端点？")
-                .NotRequired()
-                .InstructionsText("[grey](空格选择,回车确认；不选则只上传育成数据)[/]")
-                .AddChoices(OptionalEndpointGroupOptions.Select(x => x.Label)));
-
-        var selectedOptionalLabelSet = selectedOptionalLabels.ToHashSet(StringComparer.Ordinal);
-        return new PacketUploadConfig
-        {
-            Enabled = true,
-            EndpointGroups =
-            [
-                PacketUploadConfig.SingleModeEndpointGroup,
-                ..OptionalEndpointGroupOptions
-                    .Where(x => selectedOptionalLabelSet.Contains(x.Label))
-                    .Select(x => x.Group),
-            ],
-        };
-    }
-
-    static void DisposeAnalyzerRegistrations(IEnumerable<IDisposable> registrations)
-    {
-        foreach (var registration in registrations)
-            registration.Dispose();
-    }
+    void LogUploaderException(Exception exception)
+        => TerminalUi.Log("GamePacketCollector", exception.ToString(), UiSeverity.Error);
 
     string PluginVersion()
-        => GetType().Assembly.GetName().Version?.ToString() ?? "0.0.0";
-
-    static MethodInfo ResolveRawRegistrationMethod(string methodName)
-        => typeof(IPluginAnalyzerRegistry)
-            .GetMethods()
-            .Single(method =>
-            {
-                if (method.Name != methodName || !method.IsGenericMethodDefinition)
-                    return false;
-
-                var parameters = method.GetParameters();
-                return method.GetGenericArguments().Length == 1 &&
-                       parameters.Length == 2 &&
-                       parameters[0].ParameterType == typeof(Func<byte[], GameHttpHeaders, ValueTask>) &&
-                       parameters[1].ParameterType == typeof(int);
-            });
+        => GetType().Assembly.GetName().Version?.ToString()
+           ?? throw new InvalidOperationException("GamePacketCollector assembly version is missing.");
 
     sealed record EndpointGroupOption(string Group, string Label);
 }

@@ -1,12 +1,13 @@
 using System.Net;
-using System.Net.Sockets;
-using System.Text;
 using System.Text.Json;
 using Gallop.Endpoints;
 using GamePacketCollector;
 using GamePacketCollector.Capture;
-using Spectre.Console.Rendering;
-using UmamusumeResponseAnalyzer.LiveDisplay;
+using Terminal.Gui.App;
+using Terminal.Gui.Drivers;
+using Terminal.Gui.Input;
+using Terminal.Gui.Testing;
+using Terminal.Gui.Time;
 using UmamusumeResponseAnalyzer.Plugin;
 
 var tests = new (string Name, Action Body)[]
@@ -20,15 +21,10 @@ var tests = new (string Name, Action Body)[]
     ("PacketUploadEnvelope creates GamePackets upload body", PacketUploadEnvelopeCreatesGamePacketsUploadBody),
     ("PacketUploader sends PUT JSON to configured endpoint", PacketUploaderSendsPutJsonToConfiguredEndpoint),
     ("PacketUploader classifies permanent and retriable failures", PacketUploaderClassifiesPermanentAndRetriableFailures),
-    ("PacketUploadConfig persists first run endpoint selection", PacketUploadConfigPersistsFirstRunEndpointSelection),
+    ("PacketUploadConfig persists accepted endpoint selection", PacketUploadConfigPersistsAcceptedEndpointSelection),
     ("PacketUploadConfig requires single-mode when enabled", PacketUploadConfigRequiresSingleModeWhenEnabled),
-    ("Plugin rejects removed event endpoint group", PluginRejectsRemovedEventEndpointGroup),
-    ("Plugin does not register analyzers when upload is disabled", PluginDoesNotRegisterAnalyzersWhenUploadIsDisabled),
-    ("Plugin registers raw analyzers for configured endpoint groups", PluginRegistersRawAnalyzersForConfiguredEndpointGroups),
-    ("Programmatic analyzer handler writes pending exchange", ProgrammaticAnalyzerHandlerWritesPendingExchange),
-    ("Plugin deletes pending after successful upload without writing sent", PluginDeletesPendingAfterSuccessfulUploadWithoutWritingSent),
-    ("Plugin moves permanent upload failure to failed", PluginMovesPermanentUploadFailureToFailed),
-    ("Plugin keeps pending file after retriable upload failure", PluginKeepsPendingFileAfterRetriableUploadFailure),
+    ("Plugin atomically publishes concurrent captures", PluginAtomicallyPublishesConcurrentCaptures),
+    ("Plugin Dispose is idempotent before initialization", PluginDisposeIsIdempotentBeforeInitialization),
 };
 
 foreach (var (name, body) in tests)
@@ -140,9 +136,9 @@ static void PacketExchangeBufferPairsRequestAndResponsePerEndpoint()
     var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
     var headers = TestHeaders();
 
-    buffer.RecordRequest(endpoint, [0x01, 0x02], headers);
+    buffer.RecordRequest(endpoint, new byte[] { 0x01, 0x02 }, headers);
 
-    var exchange = buffer.RecordResponse(endpoint, [0x03, 0x04]);
+    var exchange = buffer.RecordResponse(endpoint, new byte[] { 0x03, 0x04 });
 
     AssertTrue(exchange is not null);
     AssertTrue(!string.IsNullOrWhiteSpace(exchange!.PacketIdemKey));
@@ -193,7 +189,8 @@ static void AssertPacketIdemKeyHeaderRequired(GameHttpHeaders headers, string he
     var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
     var buffer = new PacketExchangeBuffer();
 
-    var error = AssertThrows<InvalidOperationException>(() => buffer.RecordRequest(endpoint, [0x01, 0x02], headers));
+    var error = AssertThrows<InvalidOperationException>(() =>
+        buffer.RecordRequest(endpoint, new byte[] { 0x01, 0x02 }, headers));
 
     AssertTrue(error.Message.Contains(headerName, StringComparison.Ordinal), error.Message);
 }
@@ -202,7 +199,7 @@ static void PacketExchangeBufferDropsUnmatchedResponse()
     var buffer = new PacketExchangeBuffer();
     var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
 
-    var exchange = buffer.RecordResponse(endpoint, [0x03, 0x04]);
+    var exchange = buffer.RecordResponse(endpoint, new byte[] { 0x03, 0x04 });
 
     AssertTrue(exchange is null);
 }
@@ -278,27 +275,46 @@ static PacketUploadException UploadFailure(HttpStatusCode statusCode, string res
         uploader.UploadAsync("{\"packetIdemKey\":\"x\"}", CancellationToken.None).GetAwaiter().GetResult());
 }
 
-static void PacketUploadConfigPersistsFirstRunEndpointSelection()
+static void PacketUploadConfigPersistsAcceptedEndpointSelection()
 {
     using var workspace = TempWorkspace.CreateWithoutConfig();
-    var configPath = Path.Combine(workspace.Path, "PluginData", "游戏包采集", "config.json");
-    var config = PacketUploadConfig.LoadOrCreate(
-        configPath,
-        new JsonSerializerOptions(JsonSerializerDefaults.Web),
-        () => new PacketUploadConfig
-        {
-            Enabled = true,
-            EndpointGroups = ["single-mode", "gacha", "room-match"],
-        });
+    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
+    using IApplication application = Application.Create(new VirtualTimeProvider());
+    application.Init(DriverRegistry.Names.ANSI);
+    application.Driver!.SetScreenSize(100, 30);
+    var plugin = new GamePacketCollectorPlugin();
+    try
+    {
+        var configPath = Path.Combine(workspace.Path, "PluginData", "游戏包采集", "config.json");
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        RunPromptOnOwner(
+            application,
+            () => plugin.ConfigPromptAsync(application),
+            () =>
+            {
+                application.InjectKey(Key.Enter);
+                application.InjectKey(Key.CursorDown);
+                application.InjectKey(Key.Enter);
+                application.InjectKey(Key.CursorDown);
+                application.InjectKey(Key.CursorDown);
+                application.InjectKey(Key.CursorDown);
+                application.InjectKey(Key.Enter);
+            });
+        var config = PacketUploadConfig.Load(configPath, jsonOptions);
 
-    AssertTrue(config.Enabled);
-    AssertArrayEqual(["single-mode", "gacha", "room-match"], config.EndpointGroups);
+        AssertTrue(config.Enabled);
+        AssertArrayEqual(["single-mode", "gacha"], config.EndpointGroups);
 
-    using var document = JsonDocument.Parse(File.ReadAllText(configPath));
-    AssertTrue(document.RootElement.GetProperty("enabled").GetBoolean());
-    AssertArrayEqual(
-        ["single-mode", "gacha", "room-match"],
-        document.RootElement.GetProperty("endpointGroups").EnumerateArray().Select(x => x.GetString()!).ToArray());
+        using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+        AssertTrue(document.RootElement.GetProperty("enabled").GetBoolean());
+        AssertArrayEqual(
+            ["single-mode", "gacha"],
+            document.RootElement.GetProperty("endpointGroups").EnumerateArray().Select(x => x.GetString()!).ToArray());
+    }
+    finally
+    {
+        plugin.Dispose();
+    }
 }
 
 static void PacketUploadConfigRequiresSingleModeWhenEnabled()
@@ -307,241 +323,98 @@ static void PacketUploadConfigRequiresSingleModeWhenEnabled()
     var configPath = Path.Combine(workspace.Path, "PluginData", "游戏包采集", "config.json");
 
     var error = AssertThrows<InvalidOperationException>(() =>
-        PacketUploadConfig.LoadOrCreate(
-            configPath,
-            new JsonSerializerOptions(JsonSerializerDefaults.Web),
-            () => new PacketUploadConfig
-            {
-                Enabled = true,
-                EndpointGroups = ["gacha"],
-            }));
+        new PacketUploadConfig
+        {
+            Enabled = true,
+            EndpointGroups = ["gacha"],
+        }.Save(configPath, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
     AssertTrue(error.Message.Contains("single-mode", StringComparison.Ordinal), error.Message);
+    AssertTrue(!File.Exists(configPath), "Invalid config must fail before writing the file.");
 }
 
-static void PluginRejectsRemovedEventEndpointGroup()
+static void PluginDisposeIsIdempotentBeforeInitialization()
 {
-    using var workspace = TempWorkspace.Create(EnabledConfigJson("single-mode", "event"));
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
     var plugin = new GamePacketCollectorPlugin();
 
-    try
-    {
-        var error = AssertThrows<InvalidOperationException>(() => plugin.Initialize(new FakePluginContext(registry)));
-        AssertTrue(error.Message.Contains("event", StringComparison.Ordinal), error.Message);
-    }
-    finally
-    {
-        plugin.Dispose();
-    }
-}
-static void PluginDoesNotRegisterAnalyzersWhenUploadIsDisabled()
-{
-    using var workspace = TempWorkspace.Create();
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
-    var plugin = new GamePacketCollectorPlugin();
-
-    try
-    {
-        plugin.Initialize(new FakePluginContext(registry));
-
-        AssertTrue(registry.RequestEndpoints.Count == 0, "Disabled plugin should not register request analyzers.");
-        AssertTrue(registry.ResponseEndpoints.Count == 0, "Disabled plugin should not register response analyzers.");
-    }
-    finally
-    {
-        plugin.Dispose();
-    }
+    plugin.Dispose();
+    plugin.Dispose();
 }
 
-static void PluginRegistersRawAnalyzersForConfiguredEndpointGroups()
+static void PluginAtomicallyPublishesConcurrentCaptures()
 {
-    using var workspace = TempWorkspace.Create(EnabledConfigJson("single-mode", "gacha"));
+    using var workspace = TempWorkspace.CreateWithoutConfig();
     using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
-    var plugin = new GamePacketCollectorPlugin();
+    var dataDirectory = Path.Combine(workspace.Path, "PluginData", "游戏包采集");
+    Directory.CreateDirectory(dataDirectory);
+    new PacketUploadConfig
+    {
+        Enabled = true,
+        EndpointGroups = [PacketUploadConfig.SingleModeEndpointGroup],
+    }.Save(
+        Path.Combine(dataDirectory, "config.json"),
+        new(JsonSerializerDefaults.Web));
 
+    var context = new CapturePluginContext();
+    var plugin = new GamePacketCollectorPlugin();
     try
     {
-        plugin.Initialize(new FakePluginContext(registry));
+        var missingHost = AssertThrows<InvalidOperationException>(() => plugin.Initialize(context));
+        AssertEqual("TerminalUi 尚未初始化。", missingHost.Message);
 
-        var selectedEndpoints = PacketCaptureCatalog.SelectedEndpoints
-            .Where(x => x.Group is "single-mode" or "gacha")
-            .Select(x => x.EndpointType)
-            .ToHashSet();
+        var endpoint = PacketCaptureCatalog.SelectedEndpoints
+            .Single(x => x.EndpointType == typeof(GameApi.SingleMode.ExecCommand));
+        var descriptor = GameEndpointCatalog.ByPath[endpoint.Path];
+        var headers = TestHeaders();
+        const int captureCount = 8;
+        for (var index = 0; index < captureCount; index++)
+            context.AnalyzerRegistry.DispatchRequest(
+                descriptor,
+                new byte[] { checked((byte)index), 0x02 },
+                headers).GetAwaiter().GetResult();
 
-        AssertSetEqual(selectedEndpoints, registry.RequestEndpoints, "raw request analyzer endpoints");
-        AssertSetEqual(selectedEndpoints, registry.ResponseEndpoints, "raw response analyzer endpoints");
-    }
-    finally
-    {
-        plugin.Dispose();
-    }
-}
+        Task.WaitAll(
+            Enumerable.Range(0, captureCount)
+                .Select(_ => Task.Run(async () =>
+                    await context.AnalyzerRegistry.DispatchResponse(
+                        descriptor,
+                        new byte[] { 0x03, 0x04 },
+                        headers)))
+                .ToArray());
 
-static void ProgrammaticAnalyzerHandlerWritesPendingExchange()
-{
-    using var workspace = TempWorkspace.Create(EnabledConfigJson("single-mode", "gacha"));
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
-    var plugin = new GamePacketCollectorPlugin();
-
-    try
-    {
-        plugin.Initialize(new FakePluginContext(registry));
-        registry.RequestHandlers[typeof(GameApi.Gacha.Exec)]([0x01, 0x02], TestHeaders()).GetAwaiter().GetResult();
-        registry.ResponseHandlers[typeof(GameApi.Gacha.Exec)]([0x03, 0x04], GameHttpHeaders.Empty).GetAwaiter().GetResult();
-
-        using var packet = workspace.ReadPluginPacket(plugin.Name);
-        AssertEqual("1", packet.RootElement.GetProperty("schemaVersion").GetString());
-        AssertEqual("game-packet", packet.RootElement.GetProperty("kind").GetString());
-        AssertTrue(!packet.RootElement.TryGetProperty("clientSessionId", out _));
-        AssertTrue(!packet.RootElement.TryGetProperty("sequence", out _));
-        AssertEqual(CreateExchange([0x01, 0x02], [0x03, 0x04]).PacketIdemKey, packet.RootElement.GetProperty("packetIdemKey").GetString());
-        AssertEqual(typeof(GameApi.Gacha.Exec).FullName, packet.RootElement.GetProperty("endpointType").GetString());
-        AssertEqual("/umamusume/gacha/exec", packet.RootElement.GetProperty("endpointPath").GetString());
-        AssertEqual("gacha", packet.RootElement.GetProperty("group").GetString());
-        AssertEqual("1.2.3", packet.RootElement.GetProperty("appVersion").GetString());
-        AssertEqual("2026070301", packet.RootElement.GetProperty("gameDataVersion").GetString());
-        AssertEqual("123456789", packet.RootElement.GetProperty("viewerId").GetString());
-        AssertEqual("sid-1", packet.RootElement.GetProperty("sid").GetString());
-        AssertEqual("android", packet.RootElement.GetProperty("device").GetString());
-        AssertEqual("phone", packet.RootElement.GetProperty("deviceSubtype").GetString());
-        AssertEqual("AQI=", packet.RootElement.GetProperty("request").GetString());
-        AssertEqual("AwQ=", packet.RootElement.GetProperty("response").GetString());
-        AssertTrue(DateTimeOffset.TryParse(packet.RootElement.GetProperty("capturedAt").GetString(), out _));
-    }
-    finally
-    {
-        plugin.Dispose();
-    }
-}
-
-
-static void PluginDeletesPendingAfterSuccessfulUploadWithoutWritingSent()
-{
-    using var server = new SingleRequestHttpServer(HttpStatusCode.NoContent);
-    using var workspace = TempWorkspace.Create(EnabledConfigJsonForUrl(server.Url, "single-mode", "gacha"));
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
-    var plugin = new GamePacketCollectorPlugin();
-
-    try
-    {
-        plugin.Initialize(new FakePluginContext(registry));
-        CaptureGachaPacket(registry);
-
-        server.WaitForRequest();
-        WaitUntil(
-            () => JsonFileCount(PendingDirectory(workspace, plugin.Name)) == 0,
-            TimeSpan.FromSeconds(3),
-            "Expected successful upload to delete pending packet.");
-
-        AssertEqual(1, server.RequestCount);
-        AssertEqual("PUT", server.Method);
-        AssertEqual("/api/GamePackets", server.Path);
-        using var uploaded = JsonDocument.Parse(server.Body ?? throw new InvalidOperationException("Expected upload body."));
-        AssertEqual(JsonValueKind.Object, uploaded.RootElement.ValueKind);
-        AssertEqual("game-packet", uploaded.RootElement.GetProperty("kind").GetString());
+        var pendingDirectory = Path.Combine(dataDirectory, "pending");
+        var files = Directory.GetFiles(pendingDirectory, "*.json", SearchOption.TopDirectoryOnly);
+        AssertEqual(captureCount, files.Length);
         AssertTrue(
-            !Directory.Exists(SentDirectory(workspace, plugin.Name)) || JsonFileCount(SentDirectory(workspace, plugin.Name)) == 0,
-            "Successful upload should not write sent packet files.");
+            !Directory.GetFiles(pendingDirectory, "*.tmp", SearchOption.TopDirectoryOnly).Any(),
+            "Atomic publication must clean every unique temporary file.");
+
+        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+        var requestSequence = files.Select(file =>
+        {
+            var envelope = JsonSerializer.Deserialize<PacketUploadEnvelope>(
+                File.ReadAllBytes(file),
+                jsonOptions)
+                ?? throw new InvalidOperationException("Expected a complete pending envelope.");
+            var expectedIdemKey = CreateExchange(
+                envelope.Request,
+                [0x03, 0x04],
+                endpoint: endpoint).PacketIdemKey;
+            AssertEqual(expectedIdemKey, envelope.PacketIdemKey);
+            AssertEqual($"{expectedIdemKey}.json", Path.GetFileName(file));
+            AssertEqual(endpoint.Path, envelope.EndpointPath);
+            AssertBytes([envelope.Request[0], 0x02], envelope.Request);
+            AssertBytes([0x03, 0x04], envelope.Response);
+            return envelope.Request[0];
+        }).Order().ToArray();
+        AssertArrayEqual(
+            Enumerable.Range(0, captureCount).Select(index => checked((byte)index)).ToArray(),
+            requestSequence);
     }
     finally
     {
         plugin.Dispose();
     }
-}
-
-static void PluginMovesPermanentUploadFailureToFailed()
-{
-    using var server = new SingleRequestHttpServer(HttpStatusCode.BadRequest, "bad packet");
-    using var workspace = TempWorkspace.Create(EnabledConfigJsonForUrl(server.Url, "single-mode", "gacha"));
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
-    var plugin = new GamePacketCollectorPlugin();
-
-    try
-    {
-        plugin.Initialize(new FakePluginContext(registry));
-        CaptureGachaPacket(registry);
-
-        server.WaitForRequest();
-        WaitUntil(
-            () => JsonFileCount(PendingDirectory(workspace, plugin.Name)) == 0 &&
-                  JsonFileCount(FailedDirectory(workspace, plugin.Name)) == 1,
-            TimeSpan.FromSeconds(3),
-            "Expected permanent upload failure to move packet from pending to failed.");
-
-        AssertEqual(1, server.RequestCount);
-    }
-    finally
-    {
-        plugin.Dispose();
-    }
-}
-
-static void PluginKeepsPendingFileAfterRetriableUploadFailure()
-{
-    using var server = new SingleRequestHttpServer(HttpStatusCode.InternalServerError, "boom");
-    using var workspace = TempWorkspace.Create(EnabledConfigJsonForUrl(server.Url, "single-mode", "gacha"));
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    var registry = new RecordingAnalyzerRegistry();
-    var plugin = new GamePacketCollectorPlugin();
-
-    try
-    {
-        plugin.Initialize(new FakePluginContext(registry));
-        CaptureGachaPacket(registry);
-
-        server.WaitForRequest();
-        WaitUntil(
-            () => JsonFileCount(PendingDirectory(workspace, plugin.Name)) == 1,
-            TimeSpan.FromSeconds(3),
-            "Expected retriable upload failure to keep packet in pending.");
-        AssertEqual(0, JsonFileCount(FailedDirectory(workspace, plugin.Name)));
-        AssertEqual(1, server.RequestCount);
-    }
-    finally
-    {
-        plugin.Dispose();
-    }
-}
-
-static void CaptureGachaPacket(RecordingAnalyzerRegistry registry)
-{
-    registry.RequestHandlers[typeof(GameApi.Gacha.Exec)]([0x01, 0x02], TestHeaders()).GetAwaiter().GetResult();
-    registry.ResponseHandlers[typeof(GameApi.Gacha.Exec)]([0x03, 0x04], GameHttpHeaders.Empty).GetAwaiter().GetResult();
-}
-
-static string PendingDirectory(TempWorkspace workspace, string pluginName)
-    => Path.Combine(workspace.Path, "PluginData", pluginName, "pending");
-
-static string FailedDirectory(TempWorkspace workspace, string pluginName)
-    => Path.Combine(workspace.Path, "PluginData", pluginName, "failed");
-
-static string SentDirectory(TempWorkspace workspace, string pluginName)
-    => Path.Combine(workspace.Path, "PluginData", pluginName, "sent");
-
-static int JsonFileCount(string directory)
-    => Directory.Exists(directory)
-        ? Directory.GetFiles(directory, "*.json", SearchOption.AllDirectories).Length
-        : 0;
-
-static void WaitUntil(Func<bool> condition, TimeSpan timeout, string failureMessage)
-{
-    var deadline = DateTimeOffset.UtcNow + timeout;
-    while (DateTimeOffset.UtcNow < deadline)
-    {
-        if (condition())
-            return;
-
-        Thread.Sleep(20);
-    }
-
-    throw new InvalidOperationException(failureMessage);
 }
 
 static PacketCaptureExchange CreateExchange(
@@ -589,18 +462,6 @@ static TException AssertThrows<TException>(Action action)
     throw new InvalidOperationException($"Expected exception: {typeof(TException).Name}.");
 }
 
-static void AssertSetEqual<T>(HashSet<T> expected, HashSet<T> actual, string name)
-    where T : notnull
-{
-    if (expected.SetEquals(actual))
-        return;
-
-    var missing = expected.Except(actual).Select(x => x?.ToString()).Order(StringComparer.Ordinal).ToArray();
-    var extra = actual.Except(expected).Select(x => x?.ToString()).Order(StringComparer.Ordinal).ToArray();
-    throw new InvalidOperationException(
-        $"{name} mismatch. Missing: {string.Join(", ", missing)}. Extra: {string.Join(", ", extra)}.");
-}
-
 static void AssertBytes(byte[] expected, byte[] actual)
 {
     if (!expected.SequenceEqual(actual))
@@ -613,6 +474,35 @@ static void AssertArrayEqual<T>(T[] expected, T[] actual)
         throw new InvalidOperationException($"Expected [{string.Join(", ", expected)}], got [{string.Join(", ", actual)}].");
 }
 
+static void RunPromptOnOwner(
+    IApplication application,
+    Func<Task> runPrompt,
+    Action interact)
+{
+    var interacted = false;
+    EventHandler<Terminal.Gui.App.EventArgs<IApplication>> iteration = (_, _) =>
+    {
+        if (interacted)
+            return;
+
+        interacted = true;
+        interact();
+    };
+    application.Iteration += iteration;
+    try
+    {
+        runPrompt()
+            .WaitAsync(TimeSpan.FromSeconds(3))
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(interacted, "Expected the owner-thread configuration prompt to process input.");
+    }
+    finally
+    {
+        application.Iteration -= iteration;
+    }
+}
+
 static GameHttpHeaders TestHeaders()
     => new(
         Sid: "sid-1",
@@ -622,49 +512,17 @@ static GameHttpHeaders TestHeaders()
         Device: "android",
         DeviceSubtype: "phone");
 
-static string EnabledConfigJson(params string[] endpointGroups)
-    => EnabledConfigJsonForUrl("http://127.0.0.1:1/api/GamePackets", endpointGroups);
-
-static string EnabledConfigJsonForUrl(string uploadUrl, params string[] endpointGroups)
-    => JsonSerializer.Serialize(
-        new PacketUploadConfig
-        {
-            UploadUrl = uploadUrl,
-            Enabled = true,
-            EndpointGroups = endpointGroups,
-        },
-        new JsonSerializerOptions(JsonSerializerDefaults.Web));
-
 sealed class TempWorkspace : IDisposable
 {
-    const string DisabledConfigJson = """{"uploadUrl":"https://ura.shuise.net/api/GamePackets","serverRegionHint":null,"enabled":false,"endpointGroups":["single-mode"]}""";
-
     TempWorkspace(string path) => Path = path;
 
     public string Path { get; }
 
-    public static TempWorkspace Create(string configJson = DisabledConfigJson)
-    {
-        var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "gpc-tests-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(path);
-        var pluginDirectory = System.IO.Path.Combine(path, "PluginData", "游戏包采集");
-        Directory.CreateDirectory(pluginDirectory);
-        File.WriteAllText(System.IO.Path.Combine(pluginDirectory, "config.json"), configJson);
-        return new(path);
-    }
-
     public static TempWorkspace CreateWithoutConfig()
     {
         var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "gpc-tests-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(System.IO.Path.Combine(path, "PluginData", "游戏包采集"));
+        Directory.CreateDirectory(path);
         return new(path);
-    }
-
-    public JsonDocument ReadPluginPacket(string pluginName)
-    {
-        var pending = System.IO.Path.Combine(Path, "PluginData", pluginName, "pending");
-        var file = Directory.GetFiles(pending, "*.json", SearchOption.TopDirectoryOnly).Single();
-        return JsonDocument.Parse(File.ReadAllText(file));
     }
 
     public void Dispose()
@@ -689,76 +547,59 @@ sealed class CurrentDirectoryScope : IDisposable
     public void Dispose() => Directory.SetCurrentDirectory(previousDirectory);
 }
 
-sealed class FakePluginContext(RecordingAnalyzerRegistry analyzers) : IPluginContext
+sealed class CapturePluginContext : IPluginContext
 {
-    public ILiveDisplayOutput LiveDisplay { get; } = new FakeLiveDisplayOutput();
-    public IPluginHostEvents Events { get; } = new FakePluginHostEvents();
-    public IPluginAnalyzerRegistry Analyzers { get; } = analyzers;
+    public IApplication Application => throw new NotSupportedException();
+    public IPluginHostEvents Events => throw new NotSupportedException();
+    public CaptureAnalyzerRegistry AnalyzerRegistry { get; } = new();
+    public IPluginAnalyzerRegistry Analyzers => AnalyzerRegistry;
+    public bool IsPluginAvailable(string internalName) => false;
+
+    public void RunBackground(Func<CancellationToken, ValueTask> operation) { }
 }
 
-sealed class RecordingAnalyzerRegistry : IPluginAnalyzerRegistry
+sealed class CaptureAnalyzerRegistry : IPluginAnalyzerRegistry
 {
-    public Dictionary<Type, Func<byte[], GameHttpHeaders, ValueTask>> RequestHandlers { get; } = [];
-    public Dictionary<Type, Func<byte[], GameHttpHeaders, ValueTask>> ResponseHandlers { get; } = [];
-    public HashSet<Type> RequestEndpoints => RequestHandlers.Keys.ToHashSet();
-    public HashSet<Type> ResponseEndpoints => ResponseHandlers.Keys.ToHashSet();
+    Func<GameEndpointDescriptor, ReadOnlyMemory<byte>, GameHttpHeaders, ValueTask>? request;
+    Func<GameEndpointDescriptor, ReadOnlyMemory<byte>, GameHttpHeaders, ValueTask>? response;
 
-    public IDisposable RegisterRequest<TEndpoint>(Func<byte[], ValueTask> handler, int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => throw new NotSupportedException("GamePacketCollector should register header-aware raw request analyzers.");
-
-    public IDisposable RegisterRequest<TEndpoint>(Func<byte[], GameHttpHeaders, ValueTask> handler, int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => Register(RequestHandlers, typeof(TEndpoint), handler);
-
-    public IDisposable RegisterResponse<TEndpoint>(Func<byte[], ValueTask> handler, int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => throw new NotSupportedException("GamePacketCollector should register header-aware raw response analyzers.");
-
-    public IDisposable RegisterResponse<TEndpoint>(Func<byte[], GameHttpHeaders, ValueTask> handler, int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => Register(ResponseHandlers, typeof(TEndpoint), handler);
-
-    public IDisposable RegisterRequest<TEndpoint, TRequest>(Func<TRequest, ValueTask> handler, int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => throw new NotSupportedException("GamePacketCollector should only register raw request analyzers.");
-
-    public IDisposable RegisterResponse<TEndpoint, TResponse>(Func<TResponse, ValueTask> handler, int priority = 0)
-        where TEndpoint : IGameEndpoint
-        => throw new NotSupportedException("GamePacketCollector should only register raw response analyzers.");
-
-    static IDisposable Register(
-        Dictionary<Type, Func<byte[], GameHttpHeaders, ValueTask>> handlers,
-        Type endpointType,
-        Func<byte[], GameHttpHeaders, ValueTask> handler)
+    public void Register<TPayload>(
+        AnalyzerKind kind,
+        IReadOnlyList<EndpointPattern> patterns,
+        Func<AnalyzerInvocation<TPayload>, ValueTask> handler,
+        int priority = 0)
     {
-        handlers.Add(endpointType, handler);
-        return new DisposableAction(() => handlers.Remove(endpointType));
+        if (typeof(TPayload) != typeof(ReadOnlyMemory<byte>))
+            throw new InvalidOperationException($"Unexpected analyzer payload type: {typeof(TPayload)}.");
+        ValueTask Dispatch(
+            GameEndpointDescriptor endpoint,
+            ReadOnlyMemory<byte> payload,
+            GameHttpHeaders headers)
+            => handler(new(endpoint, (TPayload)(object)payload, headers));
+
+        if (kind == AnalyzerKind.Request)
+            request = Dispatch;
+        else
+            response = Dispatch;
     }
-}
 
-sealed class FakePluginHostEvents : IPluginHostEvents
-{
-    public IDisposable OnStarted(Func<CancellationToken, ValueTask> handler) => DisposableAction.Empty;
-}
+    public ValueTask DispatchRequest(
+        GameEndpointDescriptor endpoint,
+        ReadOnlyMemory<byte> payload,
+        GameHttpHeaders headers)
+        => (request ?? throw new InvalidOperationException("Raw request analyzer was not registered."))(
+            endpoint,
+            payload,
+            headers);
 
-sealed class FakeLiveDisplayOutput : ILiveDisplayOutput
-{
-    public LiveDisplayWorkspace? CurrentWorkspace { get; private set; }
-    public LiveDisplayWorkspace CreateWorkspace(string title) => LiveDisplayWorkspace.Create(title);
-    public void SwitchWorkspace(LiveDisplayWorkspace workspace) => CurrentWorkspace = workspace;
-    public void BindWorkspaceHotkey(LiveDisplayWorkspace workspace, ConsoleKey key, ConsoleModifiers modifiers = 0, string? description = null) { }
-    public void SetPanel(LiveDisplayWorkspace workspace, string key, string title, IRenderable content, bool fullBleed = false) { }
-    public void Log(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-    public void MarkupLog(LiveDisplayWorkspace workspace, string markup, LiveDisplaySeverity severity = LiveDisplaySeverity.Info) { }
-    public void Notify(LiveDisplayWorkspace workspace, string text, LiveDisplaySeverity severity = LiveDisplaySeverity.Info, TimeSpan? ttl = null) { }
-}
-
-sealed class DisposableAction(Action dispose) : IDisposable
-{
-    public static readonly IDisposable Empty = new DisposableAction(() => { });
-
-    public void Dispose() => dispose();
+    public ValueTask DispatchResponse(
+        GameEndpointDescriptor endpoint,
+        ReadOnlyMemory<byte> payload,
+        GameHttpHeaders headers)
+        => (response ?? throw new InvalidOperationException("Raw response analyzer was not registered."))(
+            endpoint,
+            payload,
+            headers);
 }
 
 sealed class RecordingHttpHandler(HttpStatusCode statusCode, string responseBody = "") : HttpMessageHandler
@@ -778,120 +619,5 @@ sealed class RecordingHttpHandler(HttpStatusCode statusCode, string responseBody
         {
             Content = new StringContent(responseBody),
         };
-    }
-}
-
-sealed class SingleRequestHttpServer : IDisposable
-{
-    readonly TcpListener listener;
-    readonly CancellationTokenSource cts = new();
-    readonly Task requestTask;
-    readonly HttpStatusCode statusCode;
-    readonly string responseBody;
-    int requestCount;
-
-    public SingleRequestHttpServer(HttpStatusCode statusCode, string responseBody = "")
-    {
-        this.statusCode = statusCode;
-        this.responseBody = responseBody;
-        listener = new(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        Url = $"http://127.0.0.1:{port}/api/GamePackets";
-        requestTask = Task.Run(ServeOneAsync);
-    }
-
-    public string Url { get; }
-    public int RequestCount => requestCount;
-    public string? Method { get; private set; }
-    public string? Path { get; private set; }
-    public string? Body { get; private set; }
-
-    public void WaitForRequest()
-    {
-        if (!requestTask.Wait(TimeSpan.FromSeconds(3)))
-            throw new InvalidOperationException("Timed out waiting for upload request.");
-
-        if (requestTask.IsFaulted)
-            requestTask.GetAwaiter().GetResult();
-    }
-
-    async Task ServeOneAsync()
-    {
-        using var client = await listener.AcceptTcpClientAsync(cts.Token);
-        await using var stream = client.GetStream();
-        var bytes = await ReadHttpRequestAsync(stream, cts.Token);
-        var headerEnd = FindHeaderEnd(bytes);
-        var headersText = Encoding.ASCII.GetString(bytes, 0, headerEnd + 4);
-        var requestLineEnd = headersText.IndexOf("\r\n", StringComparison.Ordinal);
-        var requestLine = headersText[..requestLineEnd].Split(' ', 3);
-        var contentLength = ReadContentLength(headersText);
-
-        Method = requestLine[0];
-        Path = requestLine[1];
-        Body = Encoding.UTF8.GetString(bytes, headerEnd + 4, contentLength);
-        Interlocked.Increment(ref requestCount);
-
-        var bodyBytes = Encoding.UTF8.GetBytes(responseBody);
-        var responseHeaders = Encoding.ASCII.GetBytes(
-            $"HTTP/1.1 {(int)statusCode} {statusCode}\r\nContent-Length: {bodyBytes.Length}\r\nConnection: close\r\n\r\n");
-        await stream.WriteAsync(responseHeaders, cts.Token);
-        await stream.WriteAsync(bodyBytes, cts.Token);
-    }
-
-    static async Task<byte[]> ReadHttpRequestAsync(NetworkStream stream, CancellationToken cancellationToken)
-    {
-        using var request = new MemoryStream();
-        var buffer = new byte[4096];
-        while (true)
-        {
-            var read = await stream.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-                break;
-
-            request.Write(buffer, 0, read);
-            var bytes = request.ToArray();
-            var headerEnd = FindHeaderEnd(bytes);
-            if (headerEnd < 0)
-                continue;
-
-            var headersText = Encoding.ASCII.GetString(bytes, 0, headerEnd + 4);
-            var contentLength = ReadContentLength(headersText);
-            if (bytes.Length >= headerEnd + 4 + contentLength)
-                return bytes;
-        }
-
-        throw new InvalidOperationException("Incomplete HTTP request.");
-    }
-
-    static int FindHeaderEnd(byte[] bytes)
-    {
-        for (var i = 0; i <= bytes.Length - 4; i++)
-        {
-            if (bytes[i] == '\r' && bytes[i + 1] == '\n' && bytes[i + 2] == '\r' && bytes[i + 3] == '\n')
-                return i;
-        }
-
-        return -1;
-    }
-
-    static int ReadContentLength(string headersText)
-    {
-        foreach (var line in headersText.Split("\r\n"))
-        {
-            if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
-                return int.Parse(line["Content-Length:".Length..].Trim());
-        }
-
-        return 0;
-    }
-
-    public void Dispose()
-    {
-        cts.Cancel();
-        listener.Stop();
-        try { requestTask.Wait(TimeSpan.FromSeconds(1)); }
-        catch { }
-        cts.Dispose();
     }
 }

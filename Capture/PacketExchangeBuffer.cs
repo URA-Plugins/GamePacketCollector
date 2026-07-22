@@ -13,7 +13,7 @@ public sealed class PacketExchangeBuffer
     readonly object gate = new();
     readonly Dictionary<Type, Queue<PendingRequest>> pendingRequests = [];
 
-    public void RecordRequest(PacketCaptureEndpoint endpoint, byte[] request, GameHttpHeaders headers)
+    public void RecordRequest(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> request, GameHttpHeaders headers)
     {
         ValidatePacketIdemKeyHeaders(headers);
 
@@ -25,13 +25,13 @@ public sealed class PacketExchangeBuffer
                 pendingRequests[endpoint.EndpointType] = queue;
             }
 
-            queue.Enqueue(new([.. request], headers));
+            queue.Enqueue(new(request.ToArray(), headers));
             while (queue.Count > MaxPendingPerEndpoint)
                 queue.Dequeue();
         }
     }
 
-    public PacketCaptureExchange? RecordResponse(PacketCaptureEndpoint endpoint, byte[] response)
+    public PacketCaptureExchange? RecordResponse(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> response)
     {
         PendingRequest request;
         lock (gate)
