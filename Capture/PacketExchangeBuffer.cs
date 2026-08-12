@@ -16,6 +16,7 @@ public sealed class PacketExchangeBuffer
     public void RecordRequest(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> request, GameHttpHeaders headers)
     {
         ValidatePacketIdemKeyHeaders(headers);
+        var requestSid = RequireHeader(headers.Sid, "X-Hachimi-sid");
 
         lock (gate)
         {
@@ -25,7 +26,7 @@ public sealed class PacketExchangeBuffer
                 pendingRequests[endpoint.EndpointType] = queue;
             }
 
-            queue.Enqueue(new(request.ToArray(), headers));
+            queue.Enqueue(new(request.ToArray(), headers, requestSid));
             while (queue.Count > MaxPendingPerEndpoint)
                 queue.Dequeue();
         }
@@ -48,15 +49,12 @@ public sealed class PacketExchangeBuffer
             EndpointType: endpoint.EndpointType.FullName ?? endpoint.EndpointType.Name,
             EndpointPath: endpoint.Path,
             Group: endpoint.Group,
-            Sid: request.Headers.Sid,
+            RequestSid: request.RequestSid,
             AppVersion: request.Headers.AppVer,
             GameDataVersion: request.Headers.ResVer,
             ViewerId: request.Headers.ViewerId,
-            Device: request.Headers.Device,
-            DeviceSubtype: request.Headers.DeviceSubtype,
             Request: request.Payload,
-            Response: responseCopy,
-            CapturedAt: DateTimeOffset.UtcNow);
+            Response: responseCopy);
     }
 
     static void ValidatePacketIdemKeyHeaders(GameHttpHeaders headers)
@@ -89,7 +87,7 @@ public sealed class PacketExchangeBuffer
 
     static string RequireHeader(string? value, string headerName)
         => string.IsNullOrWhiteSpace(value)
-            ? throw new InvalidOperationException($"GamePacketCollector requires {headerName} to create PacketIdemKey.")
+            ? throw new InvalidOperationException($"GamePacketCollector requires request header {headerName}.")
             : value;
 
     static void AppendUtf8(IncrementalHash hash, string value)
@@ -101,5 +99,5 @@ public sealed class PacketExchangeBuffer
     static string ToBase64Url(byte[] bytes)
         => Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
-    sealed record PendingRequest(byte[] Payload, GameHttpHeaders Headers);
+    sealed record PendingRequest(byte[] Payload, GameHttpHeaders Headers, string RequestSid);
 }

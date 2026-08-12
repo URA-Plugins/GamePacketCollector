@@ -13,11 +13,14 @@ using UmamusumeResponseAnalyzer.Plugin;
 var tests = new (string Name, Action Body)[]
 {
     ("PacketCaptureCatalog keeps representative endpoint paths explicit", PacketCaptureCatalogKeepsRepresentativeEndpointPathsExplicit),
+    ("PacketCaptureCatalog includes exactly 14 get choice reward endpoints", PacketCaptureCatalogIncludesExactly14GetChoiceRewardEndpoints),
     ("PacketCaptureCatalog excludes player controlled setup endpoints", PacketCaptureCatalogExcludesPlayerControlledSetupEndpoints),
     ("PacketExchangeBuffer pairs request and response per endpoint", PacketExchangeBufferPairsRequestAndResponsePerEndpoint),
+    ("PacketExchangeBuffer preserves FIFO request SID pairs", PacketExchangeBufferPreservesFifoRequestSidPairs),
     ("PacketExchangeBuffer creates deterministic PacketIdemKey", PacketExchangeBufferCreatesDeterministicPacketIdemKey),
-    ("PacketExchangeBuffer requires PacketIdemKey headers", PacketExchangeBufferRequiresPacketIdemKeyHeaders),
+    ("PacketExchangeBuffer requires upload headers", PacketExchangeBufferRequiresUploadHeaders),
     ("PacketExchangeBuffer drops unmatched response", PacketExchangeBufferDropsUnmatchedResponse),
+    ("PacketExchangeBuffer preserves raw responses without parsing headers", PacketExchangeBufferPreservesRawResponsesWithoutParsingHeaders),
     ("PacketUploadEnvelope creates GamePackets upload body", PacketUploadEnvelopeCreatesGamePacketsUploadBody),
     ("PacketUploader sends PUT JSON to configured endpoint", PacketUploaderSendsPutJsonToConfiguredEndpoint),
     ("PacketUploader classifies permanent and retriable failures", PacketUploaderClassifiesPermanentAndRetriableFailures),
@@ -40,6 +43,32 @@ foreach (var (name, body) in tests)
         Console.Error.WriteLine(ex);
         Environment.Exit(1);
     }
+}
+
+static void PacketCaptureCatalogIncludesExactly14GetChoiceRewardEndpoints()
+{
+    var paths = PacketCaptureCatalog.SelectedEndpoints
+        .Where(x => x.Path.EndsWith("/get_choice_reward", StringComparison.Ordinal))
+        .Select(x => x.Path)
+        .Order(StringComparer.Ordinal)
+        .ToArray();
+
+    AssertArrayEqual([
+        "/umamusume/single_mode/get_choice_reward",
+        "/umamusume/single_mode_arc/get_choice_reward",
+        "/umamusume/single_mode_breeders/get_choice_reward",
+        "/umamusume/single_mode_cook/get_choice_reward",
+        "/umamusume/single_mode_free/get_choice_reward",
+        "/umamusume/single_mode_legend/get_choice_reward",
+        "/umamusume/single_mode_live/get_choice_reward",
+        "/umamusume/single_mode_mecha/get_choice_reward",
+        "/umamusume/single_mode_onsen/get_choice_reward",
+        "/umamusume/single_mode_pioneer/get_choice_reward",
+        "/umamusume/single_mode_ramen/get_choice_reward",
+        "/umamusume/single_mode_sport/get_choice_reward",
+        "/umamusume/single_mode_team/get_choice_reward",
+        "/umamusume/single_mode_venus/get_choice_reward",
+    ], paths);
 }
 
 static void PacketCaptureCatalogKeepsRepresentativeEndpointPathsExplicit()
@@ -138,7 +167,8 @@ static void PacketExchangeBufferPairsRequestAndResponsePerEndpoint()
 
     buffer.RecordRequest(endpoint, new byte[] { 0x01, 0x02 }, headers);
 
-    var exchange = buffer.RecordResponse(endpoint, new byte[] { 0x03, 0x04 });
+    var response = PacketFixtures.Response;
+    var exchange = buffer.RecordResponse(endpoint, response);
 
     AssertTrue(exchange is not null);
     AssertTrue(!string.IsNullOrWhiteSpace(exchange!.PacketIdemKey));
@@ -149,24 +179,38 @@ static void PacketExchangeBufferPairsRequestAndResponsePerEndpoint()
     AssertEqual("1.2.3", exchange.AppVersion);
     AssertEqual("2026070301", exchange.GameDataVersion);
     AssertEqual("123456789", exchange.ViewerId);
-    AssertEqual("sid-1", exchange.Sid);
-    AssertEqual("android", exchange.Device);
-    AssertEqual("phone", exchange.DeviceSubtype);
+    AssertEqual("request-sid-1", exchange.RequestSid);
     AssertBytes([0x01, 0x02], exchange.Request);
-    AssertBytes([0x03, 0x04], exchange.Response);
+    AssertBytes(response, exchange.Response);
+}
+
+static void PacketExchangeBufferPreservesFifoRequestSidPairs()
+{
+    var buffer = new PacketExchangeBuffer();
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    buffer.RecordRequest(endpoint, new byte[] { 0x01 }, TestHeaders() with { Sid = "request-sid-1" });
+    buffer.RecordRequest(endpoint, new byte[] { 0x02 }, TestHeaders() with { Sid = "request-sid-2" });
+
+    var first = buffer.RecordResponse(endpoint, PacketFixtures.Response)!;
+    var second = buffer.RecordResponse(endpoint, PacketFixtures.AlternateResponse)!;
+
+    AssertEqual("request-sid-1", first.RequestSid);
+    AssertEqual("request-sid-2", second.RequestSid);
+    AssertBytes(PacketFixtures.Response, first.Response);
+    AssertBytes(PacketFixtures.AlternateResponse, second.Response);
 }
 
 static void PacketExchangeBufferCreatesDeterministicPacketIdemKey()
 {
-    var baseline = CreateExchange([0x01, 0x02], [0x03, 0x04]);
-    var same = CreateExchange([0x01, 0x02], [0x03, 0x04]);
-    var changedRequest = CreateExchange([0x01, 0x03], [0x03, 0x04]);
-    var changedResponse = CreateExchange([0x01, 0x02], [0x03, 0x05]);
-    var changedViewer = CreateExchange([0x01, 0x02], [0x03, 0x04], TestHeaders() with { ViewerId = "987654321" });
-    var changedAppVersion = CreateExchange([0x01, 0x02], [0x03, 0x04], TestHeaders() with { AppVer = "9.9.9" });
-    var changedGameDataVersion = CreateExchange([0x01, 0x02], [0x03, 0x04], TestHeaders() with { ResVer = "2026070401" });
+    var baseline = CreateExchange([0x01, 0x02], PacketFixtures.Response);
+    var same = CreateExchange([0x01, 0x02], PacketFixtures.Response);
+    var changedRequest = CreateExchange([0x01, 0x03], PacketFixtures.Response);
+    var changedResponse = CreateExchange([0x01, 0x02], PacketFixtures.AlternateResponse);
+    var changedViewer = CreateExchange([0x01, 0x02], PacketFixtures.Response, TestHeaders() with { ViewerId = "987654321" });
+    var changedAppVersion = CreateExchange([0x01, 0x02], PacketFixtures.Response, TestHeaders() with { AppVer = "9.9.9" });
+    var changedGameDataVersion = CreateExchange([0x01, 0x02], PacketFixtures.Response, TestHeaders() with { ResVer = "2026070401" });
     var roomMatchEndpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.RoomMatch.CreateRoom));
-    var changedEndpoint = CreateExchange([0x01, 0x02], [0x03, 0x04], endpoint: roomMatchEndpoint);
+    var changedEndpoint = CreateExchange([0x01, 0x02], PacketFixtures.Response, endpoint: roomMatchEndpoint);
 
     AssertEqual(baseline.PacketIdemKey, same.PacketIdemKey);
     AssertNotEqual(baseline.PacketIdemKey, changedRequest.PacketIdemKey);
@@ -177,14 +221,15 @@ static void PacketExchangeBufferCreatesDeterministicPacketIdemKey()
     AssertNotEqual(baseline.PacketIdemKey, changedEndpoint.PacketIdemKey);
 }
 
-static void PacketExchangeBufferRequiresPacketIdemKeyHeaders()
+static void PacketExchangeBufferRequiresUploadHeaders()
 {
-    AssertPacketIdemKeyHeaderRequired(TestHeaders() with { ViewerId = null }, "X-Hachimi-viewerid");
-    AssertPacketIdemKeyHeaderRequired(TestHeaders() with { ResVer = null }, "X-Hachimi-res-ver");
-    AssertPacketIdemKeyHeaderRequired(TestHeaders() with { AppVer = null }, "X-Hachimi-app-ver");
+    AssertUploadHeaderRequired(TestHeaders() with { Sid = null }, "X-Hachimi-sid");
+    AssertUploadHeaderRequired(TestHeaders() with { ViewerId = null }, "X-Hachimi-viewerid");
+    AssertUploadHeaderRequired(TestHeaders() with { ResVer = null }, "X-Hachimi-res-ver");
+    AssertUploadHeaderRequired(TestHeaders() with { AppVer = null }, "X-Hachimi-app-ver");
 }
 
-static void AssertPacketIdemKeyHeaderRequired(GameHttpHeaders headers, string headerName)
+static void AssertUploadHeaderRequired(GameHttpHeaders headers, string headerName)
 {
     var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
     var buffer = new PacketExchangeBuffer();
@@ -204,6 +249,26 @@ static void PacketExchangeBufferDropsUnmatchedResponse()
     AssertTrue(exchange is null);
 }
 
+static void PacketExchangeBufferPreservesRawResponsesWithoutParsingHeaders()
+{
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    foreach (var response in new[]
+             {
+                 PacketFixtures.ResponseWithoutDataHeaders,
+                 PacketFixtures.ResponseWithoutSid,
+                 new byte[] { 0xC1 },
+             })
+    {
+        var buffer = new PacketExchangeBuffer();
+        buffer.RecordRequest(endpoint, new byte[] { 0x01, 0x02 }, TestHeaders());
+
+        var exchange = buffer.RecordResponse(endpoint, response);
+
+        AssertTrue(exchange is not null);
+        AssertBytes(response, exchange!.Response);
+    }
+}
+
 static void PacketUploadEnvelopeCreatesGamePacketsUploadBody()
 {
     var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
@@ -215,16 +280,13 @@ static void PacketUploadEnvelopeCreatesGamePacketsUploadBody()
         AppVersion: "1.2.3",
         GameDataVersion: "2026070301",
         ViewerId: "123456789",
-        Sid: "sid-1",
-        Device: "android",
-        DeviceSubtype: "phone",
+        RequestSid: "request-sid-1",
         Request: [0x01, 0x02],
-        Response: [0x03, 0x04],
-        CapturedAt: DateTimeOffset.Parse("2026-07-03T12:30:00+08:00"));
+        Response: PacketFixtures.Response);
 
     var envelope = PacketUploadEnvelope.FromExchange(exchange);
 
-    AssertEqual("1", envelope.SchemaVersion);
+    AssertEqual("2", envelope.SchemaVersion);
     AssertEqual("idem-key", envelope.PacketIdemKey);
     AssertEqual(endpoint.EndpointType.FullName, envelope.EndpointType);
     AssertEqual(endpoint.Path, envelope.EndpointPath);
@@ -232,11 +294,32 @@ static void PacketUploadEnvelopeCreatesGamePacketsUploadBody()
     AssertEqual("1.2.3", envelope.AppVersion);
     AssertEqual("2026070301", envelope.GameDataVersion);
     AssertEqual("123456789", envelope.ViewerId);
-    AssertEqual("sid-1", envelope.Sid);
-    AssertEqual("android", envelope.Device);
-    AssertEqual("phone", envelope.DeviceSubtype);
+    AssertEqual("request-sid-1", envelope.Sid);
     AssertBytes([0x01, 0x02], envelope.Request);
-    AssertBytes([0x03, 0x04], envelope.Response);
+    AssertBytes(PacketFixtures.Response, envelope.Response);
+
+    using var document = JsonDocument.Parse(JsonSerializer.Serialize(
+        envelope,
+        new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    AssertArrayEqual([
+        "appVersion",
+        "endpointPath",
+        "endpointType",
+        "gameDataVersion",
+        "group",
+        "kind",
+        "packetIdemKey",
+        "request",
+        "response",
+        "schemaVersion",
+        "serverRegionHint",
+        "sid",
+        "viewerId",
+    ], document.RootElement.EnumerateObject().Select(x => x.Name).Order(StringComparer.Ordinal).ToArray());
+    AssertEqual("2", document.RootElement.GetProperty("schemaVersion").GetString());
+    AssertEqual("request-sid-1", document.RootElement.GetProperty("sid").GetString());
+    AssertTrue(!document.RootElement.TryGetProperty("requestSid", out _));
+    AssertTrue(!document.RootElement.TryGetProperty("responseSid", out _));
 }
 static void PacketUploaderSendsPutJsonToConfiguredEndpoint()
 {
@@ -378,7 +461,7 @@ static void PluginAtomicallyPublishesConcurrentCaptures()
                 .Select(_ => Task.Run(async () =>
                     await context.AnalyzerRegistry.DispatchResponse(
                         descriptor,
-                        new byte[] { 0x03, 0x04 },
+                        PacketFixtures.Response,
                         headers)))
                 .ToArray());
 
@@ -398,13 +481,13 @@ static void PluginAtomicallyPublishesConcurrentCaptures()
                 ?? throw new InvalidOperationException("Expected a complete pending envelope.");
             var expectedIdemKey = CreateExchange(
                 envelope.Request,
-                [0x03, 0x04],
+                PacketFixtures.Response,
                 endpoint: endpoint).PacketIdemKey;
             AssertEqual(expectedIdemKey, envelope.PacketIdemKey);
             AssertEqual($"{expectedIdemKey}.json", Path.GetFileName(file));
             AssertEqual(endpoint.Path, envelope.EndpointPath);
             AssertBytes([envelope.Request[0], 0x02], envelope.Request);
-            AssertBytes([0x03, 0x04], envelope.Response);
+            AssertBytes(PacketFixtures.Response, envelope.Response);
             return envelope.Request[0];
         }).Order().ToArray();
         AssertArrayEqual(
@@ -505,12 +588,27 @@ static void RunPromptOnOwner(
 
 static GameHttpHeaders TestHeaders()
     => new(
-        Sid: "sid-1",
+        Sid: "request-sid-1",
         AppVer: "1.2.3",
         ResVer: "2026070301",
         ViewerId: "123456789",
         Device: "android",
         DeviceSubtype: "phone");
+
+static class PacketFixtures
+{
+    // De-identified Gallop response map: data={}, data_headers={sid, servertime}.
+    public static byte[] Response => Convert.FromHexString(
+        "82A46461746180AC646174615F6865616465727382A3736964AE726573706F6E73652D7369642D31AA73657276657274696D65CE66851E00");
+
+    public static byte[] AlternateResponse => Convert.FromHexString(
+        "82A46461746180AC646174615F6865616465727382A3736964AE726573706F6E73652D7369642D32AA73657276657274696D65CE66851E00");
+
+    public static byte[] ResponseWithoutDataHeaders => Convert.FromHexString("81A46461746180");
+
+    public static byte[] ResponseWithoutSid => Convert.FromHexString(
+        "82A46461746180AC646174615F6865616465727381AA73657276657274696D65CE66851E00");
+}
 
 sealed class TempWorkspace : IDisposable
 {

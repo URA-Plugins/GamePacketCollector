@@ -2,7 +2,7 @@
 
 GamePacketCollector 是 URA 的游戏包采集插件,捕获高价值游戏 request-response raw 包并上传到 URACloud GamePackets。
 
-插件通过唯一的程序化 analyzer API，以 `Register<ReadOnlyMemory<byte>>` 分别注册 request/response；endpoint 集合由 exact 与不跨 `/` 的 wildcard pattern 在 Host catalog 中展开。插件采集原始 MessagePack bytes，不在本地解析、筛选字段或脱敏。插件按 endpoint FIFO 配对 request/response，生成完整 HTTP exchange 后上传。当前采集类别:
+插件通过唯一的程序化 analyzer API，以 `Register<ReadOnlyMemory<byte>>` 分别注册 request/response；endpoint 集合由 exact 与不跨 `/` 的 wildcard pattern 在 Host catalog 中展开。插件采集原始 MessagePack bytes，不解析 response payload。插件按 endpoint FIFO 配对 request/response，生成完整 HTTP exchange 后上传。当前采集类别:
 
 - `single-mode`: 育成开始、恢复、事件、训练/行动、比赛、技能、因子、剧本专属动作、结算。
 - `room-match`: 自定义比赛房间、报名、轮询、开赛、结果、历史结果、比赛条件。
@@ -18,7 +18,9 @@ GamePacketCollector 是 URA 的游戏包采集插件,捕获高价值游戏 reque
 pending 文件是 URACloud `/GamePackets` 的上传体:
 
 ```json
-{"schemaVersion":"1","kind":"game-packet","capturedAt":"2026-07-03T12:30:00.0000000+08:00","packetIdemKey":"q7GM4Ai8B0V9TgdVMRCGsQ1jEmrh3K4ptYqz6RU8RFc","endpointType":"Gallop.Endpoints.GameApi.Gacha.Exec","endpointPath":"/umamusume/gacha/exec","group":"gacha","request":"...","response":"...","serverRegionHint":null,"sid":"sid-1","gameDataVersion":"2026070301","appVersion":"1.2.3","viewerId":"123456789","device":"android","deviceSubtype":"phone"}
+{"schemaVersion":"2","kind":"game-packet","packetIdemKey":"q7GM4Ai8B0V9TgdVMRCGsQ1jEmrh3K4ptYqz6RU8RFc","endpointType":"Gallop.Endpoints.GameApi.Gacha.Exec","endpointPath":"/umamusume/gacha/exec","group":"gacha","request":"...","response":"...","serverRegionHint":null,"sid":"request-sid-1","gameDataVersion":"2026070301","appVersion":"1.2.3","viewerId":"123456789"}
 ```
 
-`appVersion`、`gameDataVersion`、`viewerId` 来自宿主传入的真实 `X-Hachimi-*` request headers,用于生成 `packetIdemKey`; 缺失时该包 fail fast。`sid`、`device`、`deviceSubtype` 缺失时对应字段为 `null`。
+`sid` 来自真实 `X-Hachimi-sid` request header，缺失时该包 fail fast。response 原包保留 `data_headers.sid` 与 `data_headers.servertime`；URACloud 从 raw response 派生 `next_request_sid` 与 `response_server_time`，采集插件不解析这些字段。
+
+`appVersion`、`gameDataVersion`、`viewerId` 来自宿主传入的真实 `X-Hachimi-*` request headers，用于生成 `packetIdemKey`；缺失时该包 fail fast。
