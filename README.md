@@ -24,3 +24,11 @@ pending 文件是 URACloud `/GamePackets` 的上传体:
 `sid` 来自真实 `X-Hachimi-sid` request header，缺失时该包 fail fast。response 原包保留 `data_headers.sid` 与 `data_headers.servertime`；URACloud 从 raw response 派生 `next_request_sid` 与 `response_server_time`，采集插件不解析这些字段。
 
 `appVersion`、`gameDataVersion`、`viewerId` 来自宿主传入的真实 `X-Hachimi-*` request headers，用于生成 `packetIdemKey`；缺失时该包 fail fast。
+
+## 构建
+
+```powershell
+git -c core.longpaths=true submodule update --init --recursive
+dotnet build .\GamePacketCollector.csproj -c Release -m:1 -p:RuntimeIdentifier=win-x64 -p:SelfContained=false -p:PlatformTarget=AnyCPU -p:DeployUraPluginToLocalAppDataOnBuild=false
+dotnet run --project .\tests\GamePacketCollector.Tests\GamePacketCollector.Tests.csproj -c Release -p:GenerateUraPluginManifestOnBuild=false -p:PackageUraPluginOnBuild=false -p:DeployUraPluginToLocalAppDataOnBuild=false
+```
