@@ -22,4 +22,8 @@
     <PackageReference Include="Terminal.Gui" Version="2.4.17" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="UmamusumeResponseAnalyzer" Version="2026.9.1" />
+  </ItemGroup>
+
 </Project>
