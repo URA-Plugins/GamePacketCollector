@@ -9,7 +9,7 @@ GamePacketCollector 是 URA 的游戏包采集插件,捕获高价值游戏 reque
 - `race`: Champions、TeamStadium、PracticeRace、ChallengeMatch、DailyRace、UltimateRace 等比赛核心链路。
 - `gacha`: `Gacha.Exec`、抽卡历史与奖品历史。
 
-采集包先写入插件数据目录下的 `pending/*.json`,上传成功后删除 pending 文件。上传循环通过 `IPluginContext.RunBackground` 交给 Host 管理；卸载时由 Host 取消并等待。上传循环按文件大小 pacing; HTTP 408/429/5xx 和网络异常保留 pending 并重试,其它 HTTP 失败移动到 `failed/yyyyMMdd/`。每个 pending 文件单独上传到 URACloud `/GamePackets`。配置文件为 `PluginData/游戏包采集/config.json`; 文件不存在时，插件在 Host 的 `OnStarted` 回调中使用 `context.Application` 创建 Terminal.Gui dialog。选项区使用 Terminal.Gui 原生 `Menu` 和 `CheckBox` command views,支持 Up/Down、hover、Enter 和 click。取消不会写入配置或注册 analyzer,首次配置保存后立即按所选配置激活:
+采集包先写入插件数据目录下的 `pending/*.json`,上传成功后删除 pending 文件。插件持有上传任务，并在 `DisposeAsync` 中取消和等待。上传循环按文件大小 pacing; HTTP 408/429/5xx 和网络异常保留 pending 并重试,其它 HTTP 失败移动到 `failed/yyyyMMdd/`。每个 pending 文件单独上传到 URACloud `/GamePackets`。配置文件为 `PluginData/游戏包采集/config.json`; 文件不存在时，插件在 `StartAsync` 中使用 `context.Application` 创建 Terminal.Gui dialog。选项区使用 Terminal.Gui 原生 `Menu` 和 `CheckBox` command views,支持 Up/Down、hover、Enter 和 click。取消不会写入配置或注册 analyzer,首次配置保存后立即按所选配置激活:
 
 ```json
 {"uploadUrl":"https://ura.shuise.net/api/GamePackets","serverRegionHint":null,"enabled":true,"endpointGroups":["single-mode","gacha"]}

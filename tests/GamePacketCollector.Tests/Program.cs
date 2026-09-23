@@ -27,7 +27,7 @@ var tests = new (string Name, Action Body)[]
     ("PacketUploadConfig persists accepted endpoint selection", PacketUploadConfigPersistsAcceptedEndpointSelection),
     ("PacketUploadConfig requires single-mode when enabled", PacketUploadConfigRequiresSingleModeWhenEnabled),
     ("Plugin atomically publishes concurrent captures", PluginAtomicallyPublishesConcurrentCaptures),
-    ("Plugin Dispose is idempotent before initialization", PluginDisposeIsIdempotentBeforeInitialization),
+    ("Plugin can dispose before initialization", PluginCanDisposeBeforeInitialization),
 };
 
 foreach (var (name, body) in tests)
@@ -396,7 +396,7 @@ static void PacketUploadConfigPersistsAcceptedEndpointSelection()
     }
     finally
     {
-        plugin.Dispose();
+        plugin.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 }
 
@@ -416,12 +416,11 @@ static void PacketUploadConfigRequiresSingleModeWhenEnabled()
     AssertTrue(!File.Exists(configPath), "Invalid config must fail before writing the file.");
 }
 
-static void PluginDisposeIsIdempotentBeforeInitialization()
+static void PluginCanDisposeBeforeInitialization()
 {
     var plugin = new GamePacketCollectorPlugin();
 
-    plugin.Dispose();
-    plugin.Dispose();
+    plugin.DisposeAsync().AsTask().GetAwaiter().GetResult();
 }
 
 static void PluginAtomicallyPublishesConcurrentCaptures()
@@ -496,7 +495,7 @@ static void PluginAtomicallyPublishesConcurrentCaptures()
     }
     finally
     {
-        plugin.Dispose();
+        plugin.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
 }
 
@@ -648,12 +647,12 @@ sealed class CurrentDirectoryScope : IDisposable
 sealed class CapturePluginContext : IPluginContext
 {
     public IApplication Application => throw new NotSupportedException();
-    public IPluginHostEvents Events => throw new NotSupportedException();
     public CaptureAnalyzerRegistry AnalyzerRegistry { get; } = new();
     public IPluginAnalyzerRegistry Analyzers => AnalyzerRegistry;
     public bool IsPluginAvailable(string internalName) => false;
 
-    public void RunBackground(Func<CancellationToken, ValueTask> operation) { }
+    public void ReportBackgroundFailure(Exception error)
+        => throw new InvalidOperationException("GamePacketCollector background work failed.", error);
 }
 
 sealed class CaptureAnalyzerRegistry : IPluginAnalyzerRegistry

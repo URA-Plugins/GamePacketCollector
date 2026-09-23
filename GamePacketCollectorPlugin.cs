@@ -33,6 +33,10 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
     IReadOnlyDictionary<string, PacketCaptureEndpoint>? captureEndpointsByPath;
     PacketUploader? uploader;
     HttpClient? httpClient;
+    readonly CancellationTokenSource uploadCancellation = new();
+    Task? uploadTask;
+    IPluginContext context = null!;
+    bool needsFirstRunConfiguration;
     int permanentUploadFailureNotified;
     string pendingDirectory = string.Empty;
     string failedDirectory = string.Empty;
@@ -42,10 +46,10 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
 
     public void Initialize(IPluginContext context)
     {
+        this.context = context;
         if (!File.Exists(ConfigPath))
         {
-            context.Events.OnStarted(
-                cancellationToken => ConfigureFirstRunAsync(context, cancellationToken));
+            needsFirstRunConfiguration = true;
             TerminalUi.Log(
                 "GamePacketCollector",
                 $"GamePacketCollector 尚未配置；启动后将显示首次配置。配置文件: {ConfigPath}",
@@ -55,6 +59,8 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
 
         uploadConfig = PacketUploadConfig.Load(ConfigPath, JsonOptions);
         TerminalUi.Log("GamePacketCollector", Activate(context), UiSeverity.Info);
+        if (uploadConfig.Enabled)
+            uploadTask = Task.Run(() => UploadLoop(uploadCancellation.Token));
     }
 
     public async Task ConfigPromptAsync(IApplication application, CancellationToken cancellationToken = default)
@@ -208,8 +214,10 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         };
     }
 
-    async ValueTask ConfigureFirstRunAsync(IPluginContext context, CancellationToken cancellationToken)
+    public async ValueTask StartAsync(CancellationToken cancellationToken = default)
     {
+        if (!needsFirstRunConfiguration)
+            return;
         try
         {
             try
@@ -231,9 +239,18 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
             uploadConfig = PacketUploadConfig.Load(ConfigPath, JsonOptions);
             var activationMessage = Activate(context);
             TerminalUi.Log("GamePacketCollector", activationMessage, UiSeverity.Info);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (uploadConfig.Enabled)
+                uploadTask = Task.Run(() => UploadLoop(uploadCancellation.Token));
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch
         {
+            httpClient?.Dispose();
+            httpClient = null;
+            uploader = null;
+            exchangeBuffer = null;
+            captureEndpointsByPath = null;
+            throw;
         }
     }
 
@@ -250,13 +267,13 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
 
         exchangeBuffer = new();
         captureEndpointsByPath = captureEndpoints.ToDictionary(endpoint => endpoint.Path, StringComparer.Ordinal);
+        PrepareUploader();
         RegisterAnalyzers(context.Analyzers, captureEndpoints);
-        StartUploader(context);
 
         return $"GamePacketCollector 已注册 {captureEndpoints.Count} 个端点的 raw request/response 采集，上传到 {uploadConfig.UploadUrl}，pending 目录: {pendingDirectory}";
     }
 
-    public void Dispose()
+    public async ValueTask DisposeAsync()
     {
         var cleanupExceptions = new List<Exception>();
         void Capture(Action cleanup)
@@ -272,6 +289,17 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         }
 
         Capture(() => uploadQueue.Writer.TryComplete());
+        Capture(uploadCancellation.Cancel);
+        try
+        {
+            if (uploadTask is not null)
+                await uploadTask.ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            cleanupExceptions.Add(error);
+        }
+        Capture(uploadCancellation.Dispose);
         Capture(() => httpClient?.Dispose());
 
         if (cleanupExceptions.Count > 0)
@@ -340,7 +368,7 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         uploadQueue.Writer.TryWrite(file);
     }
 
-    void StartUploader(IPluginContext context)
+    void PrepareUploader()
     {
         httpClient = new()
         {
@@ -351,8 +379,6 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
 
         foreach (var file in Directory.GetFiles(pendingDirectory, "*.json", SearchOption.TopDirectoryOnly))
             uploadQueue.Writer.TryWrite(file);
-
-        context.RunBackground(cancellationToken => new(UploadLoop(cancellationToken)));
     }
 
     async Task UploadLoop(CancellationToken cancellationToken)
@@ -363,6 +389,10 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
                 await TryUploadFile(file, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            context.ReportBackgroundFailure(error);
+        }
     }
 
     async Task TryUploadFile(string file, CancellationToken cancellationToken)
