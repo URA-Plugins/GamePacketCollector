@@ -5,7 +5,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>2026.9.26</Version>
+    <Version>2026.9.26.1</Version>
 
     <!-- URA 插件元数据:由仓库根 build targets 用来生成 manifest.json -->
     <PluginInternalName>GamePacketCollector</PluginInternalName>
