@@ -10,6 +10,21 @@ using Terminal.Gui.Testing;
 using Terminal.Gui.Time;
 using UmamusumeResponseAnalyzer.Plugin;
 
+RepositoryChecks.Run();
+if (args.Length != 0 && args is not ["--package-load"]) throw new ArgumentException("Usage: GamePacketCollector.Tests [--package-load]");
+using (var ui = new WorkspaceSmokeSession())
+{
+    if (args.Length == 0)
+    {
+        WorkspaceLifecycleSmoke.Run(ui, () => new GamePacketCollectorPlugin(), "GamePacketCollector");
+        PluginRemainsInactiveWhenDisabled(ui);
+        GamePacketCollectorRuntimeSmoke.Run(ui);
+    }
+    PackageLoadSmoke.Run(ui);
+}
+if (args.Length != 0) return;
+
+CatalogSmoke.Run();
 var tests = new (string Name, Action Body)[]
 {
     ("PacketCaptureCatalog keeps representative endpoint paths explicit", PacketCaptureCatalogKeepsRepresentativeEndpointPathsExplicit),
@@ -43,6 +58,32 @@ foreach (var (name, body) in tests)
         Console.Error.WriteLine(ex);
         Environment.Exit(1);
     }
+}
+
+static void PluginRemainsInactiveWhenDisabled(WorkspaceSmokeSession ui)
+{
+    using var directory = new TempCurrentDirectory("collector-disabled");
+    using var listener = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
+    listener.Start();
+    var dataDirectory = Path.Combine("PluginData", "游戏包采集");
+    Directory.CreateDirectory(dataDirectory);
+    new PacketUploadConfig
+    {
+        Enabled = false,
+        UploadUrl = $"http://127.0.0.1:{((IPEndPoint)listener.LocalEndpoint).Port}/GamePackets"
+    }.Save(Path.Combine(dataDirectory, "config.json"), new(JsonSerializerDefaults.Web));
+    using var context = new RuntimePluginContext(ui.Application);
+    var plugin = new GamePacketCollectorPlugin();
+    try
+    {
+        plugin.Initialize(context);
+        plugin.StartAsync().GetAwaiter().GetResult();
+        AssertEqual(0, context.AnalyzerRegistry.Registrations.Count);
+        AssertTrue(!Directory.Exists(Path.Combine(dataDirectory, "pending")));
+    }
+    finally { plugin.DisposeAsync().GetAwaiter().GetResult(); }
+    AssertTrue(!listener.Pending(), "Disabled Collector connected to its upload endpoint.");
+    Console.WriteLine("PASS disabled Collector: no handlers, pending files or upload connection");
 }
 
 static void PacketCaptureCatalogIncludesExactly14GetChoiceRewardEndpoints()
@@ -162,7 +203,7 @@ static void PacketCaptureCatalogExcludesPlayerControlledSetupEndpoints()
 static void PacketExchangeBufferPairsRequestAndResponsePerEndpoint()
 {
     var buffer = new PacketExchangeBuffer();
-    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
     var headers = TestHeaders();
 
     buffer.RecordRequest(endpoint, new byte[] { 0x01, 0x02 }, headers);
@@ -187,7 +228,7 @@ static void PacketExchangeBufferPairsRequestAndResponsePerEndpoint()
 static void PacketExchangeBufferPreservesFifoRequestSidPairs()
 {
     var buffer = new PacketExchangeBuffer();
-    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
     buffer.RecordRequest(endpoint, new byte[] { 0x01 }, TestHeaders() with { Sid = "request-sid-1" });
     buffer.RecordRequest(endpoint, new byte[] { 0x02 }, TestHeaders() with { Sid = "request-sid-2" });
 
@@ -231,7 +272,7 @@ static void PacketExchangeBufferRequiresUploadHeaders()
 
 static void AssertUploadHeaderRequired(GameHttpHeaders headers, string headerName)
 {
-    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
     var buffer = new PacketExchangeBuffer();
 
     var error = AssertThrows<InvalidOperationException>(() =>
@@ -242,7 +283,7 @@ static void AssertUploadHeaderRequired(GameHttpHeaders headers, string headerNam
 static void PacketExchangeBufferDropsUnmatchedResponse()
 {
     var buffer = new PacketExchangeBuffer();
-    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
 
     var exchange = buffer.RecordResponse(endpoint, new byte[] { 0x03, 0x04 });
 
@@ -251,7 +292,7 @@ static void PacketExchangeBufferDropsUnmatchedResponse()
 
 static void PacketExchangeBufferPreservesRawResponsesWithoutParsingHeaders()
 {
-    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
     foreach (var response in new[]
              {
                  PacketFixtures.ResponseWithoutDataHeaders,
@@ -271,7 +312,7 @@ static void PacketExchangeBufferPreservesRawResponsesWithoutParsingHeaders()
 
 static void PacketUploadEnvelopeCreatesGamePacketsUploadBody()
 {
-    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var endpoint = PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
     var exchange = new PacketCaptureExchange(
         PacketIdemKey: "idem-key",
         EndpointType: endpoint.EndpointType.FullName!,
@@ -360,44 +401,50 @@ static PacketUploadException UploadFailure(HttpStatusCode statusCode, string res
 
 static void PacketUploadConfigPersistsAcceptedEndpointSelection()
 {
-    using var workspace = TempWorkspace.CreateWithoutConfig();
-    using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
-    using IApplication application = Application.Create(new VirtualTimeProvider());
-    application.Init(DriverRegistry.Names.ANSI);
-    application.Driver!.SetScreenSize(100, 30);
-    var plugin = new GamePacketCollectorPlugin();
+    var previousDriverIo = Environment.GetEnvironmentVariable("DisableRealDriverIO");
+    Environment.SetEnvironmentVariable("DisableRealDriverIO", "1");
     try
     {
-        var configPath = Path.Combine(workspace.Path, "PluginData", "游戏包采集", "config.json");
-        var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
-        RunPromptOnOwner(
-            application,
-            () => plugin.ConfigPromptAsync(application),
-            () =>
-            {
-                application.InjectKey(Key.Enter);
-                application.InjectKey(Key.CursorDown);
-                application.InjectKey(Key.Enter);
-                application.InjectKey(Key.CursorDown);
-                application.InjectKey(Key.CursorDown);
-                application.InjectKey(Key.CursorDown);
-                application.InjectKey(Key.Enter);
-            });
-        var config = PacketUploadConfig.Load(configPath, jsonOptions);
+        using var workspace = TempWorkspace.CreateWithoutConfig();
+        using var currentDirectory = CurrentDirectoryScope.Enter(workspace.Path);
+        using IApplication application = Application.Create(new VirtualTimeProvider());
+        application.Init(DriverRegistry.Names.ANSI);
+        application.Driver!.SetScreenSize(100, 30);
+        var plugin = new GamePacketCollectorPlugin();
+        try
+        {
+            var configPath = Path.Combine(workspace.Path, "PluginData", "游戏包采集", "config.json");
+            var jsonOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+            RunPromptOnOwner(
+                application,
+                () => plugin.ConfigPromptAsync(application),
+                () =>
+                {
+                    application.InjectKey(Key.Enter);
+                    application.InjectKey(Key.CursorDown);
+                    application.InjectKey(Key.Enter);
+                    application.InjectKey(Key.CursorDown);
+                    application.InjectKey(Key.CursorDown);
+                    application.InjectKey(Key.CursorDown);
+                    application.InjectKey(Key.Enter);
+                });
+            var config = PacketUploadConfig.Load(configPath, jsonOptions);
 
-        AssertTrue(config.Enabled);
-        AssertArrayEqual(["single-mode", "gacha"], config.EndpointGroups);
+            AssertTrue(config.Enabled);
+            AssertArrayEqual(["single-mode", "gacha"], config.EndpointGroups);
 
-        using var document = JsonDocument.Parse(File.ReadAllText(configPath));
-        AssertTrue(document.RootElement.GetProperty("enabled").GetBoolean());
-        AssertArrayEqual(
-            ["single-mode", "gacha"],
-            document.RootElement.GetProperty("endpointGroups").EnumerateArray().Select(x => x.GetString()!).ToArray());
+            using var document = JsonDocument.Parse(File.ReadAllText(configPath));
+            AssertTrue(document.RootElement.GetProperty("enabled").GetBoolean());
+            AssertArrayEqual(
+                ["single-mode", "gacha"],
+                document.RootElement.GetProperty("endpointGroups").EnumerateArray().Select(x => x.GetString()!).ToArray());
+        }
+        finally
+        {
+            plugin.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
     }
-    finally
-    {
-        plugin.DisposeAsync().AsTask().GetAwaiter().GetResult();
-    }
+    finally { Environment.SetEnvironmentVariable("DisableRealDriverIO", previousDriverIo); }
 }
 
 static void PacketUploadConfigRequiresSingleModeWhenEnabled()
@@ -507,7 +554,7 @@ static PacketCaptureExchange CreateExchange(
     GameHttpHeaders? headers = null,
     PacketCaptureEndpoint? endpoint = null)
 {
-    var selectedEndpoint = endpoint ?? PacketCaptureCatalog.SelectedEndpoints.Single(x => x.EndpointType == typeof(GameApi.Gacha.Exec));
+    var selectedEndpoint = endpoint ?? PacketCaptureCatalog.SelectedEndpoints.Single(x => x.Path == "/umamusume/gacha/exec");
     var buffer = new PacketExchangeBuffer();
     buffer.RecordRequest(selectedEndpoint, request, headers ?? TestHeaders());
     return buffer.RecordResponse(selectedEndpoint, response) ?? throw new InvalidOperationException("Expected paired exchange.");
