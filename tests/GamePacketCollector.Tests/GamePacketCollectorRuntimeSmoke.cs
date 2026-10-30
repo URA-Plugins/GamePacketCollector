@@ -5,7 +5,6 @@ using System.Text.Json;
 using GamePacketCollector;
 using UmamusumeResponseAnalyzer.Plugin;
 using UmamusumeResponseAnalyzer.TerminalGui;
-using UiText = UmamusumeResponseAnalyzer.Localization.TerminalGui;
 
 static class GamePacketCollectorRuntimeSmoke
 {
@@ -27,9 +26,6 @@ static class GamePacketCollectorRuntimeSmoke
         File.WriteAllText(Path.Combine(pendingDirectory, "second.json"), "{\"packetIdemKey\":\"second\"}");
 
         ui.ShowBootstrapLogs();
-        var beforeFailure = ui.CaptureScreen();
-        if (HasPermanentFailureNotification(beforeFailure))
-            throw new InvalidOperationException("A GamePacketCollector upload-failure notification was already visible before the upload attempt.");
 
         using var context = new RuntimePluginContext(ui.Application);
         var plugin = new GamePacketCollectorPlugin();
@@ -47,10 +43,7 @@ static class GamePacketCollectorRuntimeSmoke
             if (!ReferenceEquals(Workspace.Current, ui.Bootstrap))
                 throw new InvalidOperationException("GamePacketCollector changed the active Workspace while logging upload failures.");
 
-            var framebuffer = string.Empty;
-            WaitUntil(
-                () => HasPermanentFailureNotification(framebuffer = ui.CaptureScreen()),
-                "The public framebuffer did not show the new GamePacketCollector Error notification card.");
+            var framebuffer = ui.CaptureScreen();
             if (!framebuffer.Contains("GamePackets upload failed: 400", StringComparison.Ordinal))
                 throw new InvalidOperationException("The Bootstrap recent-log framebuffer did not show the upload failure.");
         }
@@ -91,21 +84,6 @@ static class GamePacketCollectorRuntimeSmoke
         if (File.ReadAllText(interruptedFile) != interruptedPacket)
             throw new InvalidOperationException("GamePacketCollector shutdown did not preserve its pending upload.");
         Console.WriteLine("PASS GamePacketCollector shutdown cancels an in-flight upload and preserves pending bytes");
-    }
-
-    static bool HasPermanentFailureNotification(string framebuffer)
-    {
-        var lines = framebuffer.ReplaceLineEndings("\n").Split('\n');
-        for (var index = 0; index < lines.Length - 1; index++)
-        {
-            if (lines[index].Contains(UiText.Severity_Error, StringComparison.Ordinal)
-                && lines[index + 1].Contains("[GamePacketCollector] 上传失败", StringComparison.Ordinal))
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     static void WaitUntil(Func<bool> condition, string failure)

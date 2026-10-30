@@ -491,7 +491,7 @@ static void PluginAtomicallyPublishesConcurrentCaptures()
         var missingHost = AssertThrows<InvalidOperationException>(() => plugin.Initialize(context));
         var resources = new System.Resources.ResourceManager(
             "UmamusumeResponseAnalyzer.Localization.TerminalGui", typeof(IPlugin).Assembly);
-        AssertEqual(resources.GetString("Host_NotInitialized"), missingHost.Message);
+        AssertEqual(resources.GetString("Host_Stopped"), missingHost.Message);
 
         var endpoint = PacketCaptureCatalog.SelectedEndpoints
             .Single(x => x.EndpointType == typeof(GameApi.SingleMode.ExecCommand));

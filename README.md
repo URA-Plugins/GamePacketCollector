@@ -35,7 +35,7 @@ act workflow_dispatch --artifact-server-path "$env:TEMP/ura-act-artifacts"
 
 ## 验证与发布
 
-`tests/GamePacketCollector.Tests` 覆盖端点集合、原包配对与幂等键、配置、并发落盘、上传失败分类、失败通知和关闭时保留 pending，并加载本轮 ZIP 验证 loopback PUT、原始字节与头字段、程序集来源及清理。
+`tests/GamePacketCollector.Tests` 覆盖端点集合、原包配对与幂等键、配置、并发落盘、上传失败分类、错误日志和关闭时保留 pending，并加载本轮 ZIP 验证 loopback PUT、原始字节与头字段、程序集来源及清理。
 
 测试使用 `UraTestHostRoot` 指定匹配的 Host 源码；生产插件继续引用 NuGet。默认入口先执行本仓发布边界检查。运行前将 `URA_PLUGIN_SMOKE_PACKAGE_ROOT` 设为本轮构建 ZIP 所在目录，按 manifest 的 `InternalName` 唯一匹配；缺包或重复包明确失败。GitHub Actions 未设置该变量时使用 `GITHUB_WORKSPACE/artifacts`。`--package-load` 单独运行 ZIP 验证。本仓测试工具位于 `tests/Support`，上传测试只连接本地临时服务。
 

@@ -5,21 +5,21 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>2026.9.26.1</Version>
+    <Version>2026.10.31</Version>
 
     <!-- URA 插件元数据:由仓库根 build targets 用来生成 manifest.json -->
     <PluginInternalName>GamePacketCollector</PluginInternalName>
     <PluginDisplayName>游戏包采集</PluginDisplayName>
     <PluginAuthor>URA</PluginAuthor>
     <PluginDescription>捕获高价值游戏 request-response raw 包并上传到 URACloud GamePackets。</PluginDescription>
-    <PluginChangelog>同步 URACloud schema v2 单 SID 上传合同。</PluginChangelog>
+    <PluginChangelog>同步 URACloud schema v2 单 SID 上传合同；更新 Host SDK 和构建依赖。</PluginChangelog>
     <PluginRepositoryUrl>https://github.com/URA-Plugins/GamePacketCollector</PluginRepositoryUrl>
     <PluginCategory>数据采集</PluginCategory>
   </PropertyGroup>
 
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
-    <PackageReference Include="Terminal.Gui" Version="2.4.17" />
+    <PackageReference Include="Terminal.Gui" Version="2.5.0" />
   </ItemGroup>
 
   <ItemGroup>
