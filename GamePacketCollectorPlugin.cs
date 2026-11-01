@@ -325,14 +325,14 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
         return ValueTask.CompletedTask;
     }
 
-    ValueTask CaptureResponse(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> msgpack)
+    ValueTask CaptureResponse(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> msgpack, Guid requestId)
     {
         try
         {
             if (exchangeBuffer is null)
                 throw new InvalidOperationException("GamePacketCollector is not initialized.");
 
-            var exchange = exchangeBuffer.RecordResponse(endpoint, msgpack);
+            var exchange = exchangeBuffer.RecordResponse(endpoint, msgpack, requestId);
             if (exchange is not null)
                 WritePendingExchange(exchange);
         }
@@ -478,7 +478,8 @@ public sealed partial class GamePacketCollectorPlugin : IPlugin
             patterns,
             invocation => CaptureResponse(
                 byPath[invocation.Endpoint.Path],
-                invocation.Payload));
+                invocation.Payload,
+                invocation.Headers.RequestId));
     }
 
     static IReadOnlyList<PacketCaptureEndpoint> ResolveCaptureEndpoints(PacketUploadConfig config)

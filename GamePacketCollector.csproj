@@ -5,14 +5,14 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>2026.10.31</Version>
+    <Version>2026.11.1.1</Version>
 
     <!-- URA 插件元数据:由仓库根 build targets 用来生成 manifest.json -->
     <PluginInternalName>GamePacketCollector</PluginInternalName>
     <PluginDisplayName>游戏包采集</PluginDisplayName>
     <PluginAuthor>URA</PluginAuthor>
     <PluginDescription>捕获高价值游戏 request-response raw 包并上传到 URACloud GamePackets。</PluginDescription>
-    <PluginChangelog>同步 URACloud schema v2 单 SID 上传合同；更新 Host SDK 和构建依赖。</PluginChangelog>
+    <PluginChangelog>按 endpoint 和 RequestId 配对请求与响应，仅上传完整交换。</PluginChangelog>
     <PluginRepositoryUrl>https://github.com/URA-Plugins/GamePacketCollector</PluginRepositoryUrl>
     <PluginCategory>数据采集</PluginCategory>
   </PropertyGroup>
@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="UmamusumeResponseAnalyzer" Version="*" PrivateAssets="all" />
+    <PackageReference Include="UmamusumeResponseAnalyzer" Version="[2026.11.1.2,)" PrivateAssets="all" />
   </ItemGroup>
 
 </Project>

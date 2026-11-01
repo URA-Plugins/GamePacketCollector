@@ -11,7 +11,7 @@ public sealed class PacketExchangeBuffer
     static readonly byte[] Separator = [0];
 
     readonly object gate = new();
-    readonly Dictionary<Type, Queue<PendingRequest>> pendingRequests = [];
+    readonly Dictionary<Type, List<PendingRequest>> pendingRequests = [];
 
     public void RecordRequest(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> request, GameHttpHeaders headers)
     {
@@ -20,27 +20,32 @@ public sealed class PacketExchangeBuffer
 
         lock (gate)
         {
-            if (!pendingRequests.TryGetValue(endpoint.EndpointType, out var queue))
+            if (!pendingRequests.TryGetValue(endpoint.EndpointType, out var pending))
             {
-                queue = new();
-                pendingRequests[endpoint.EndpointType] = queue;
+                pending = [];
+                pendingRequests[endpoint.EndpointType] = pending;
             }
 
-            queue.Enqueue(new(request.ToArray(), headers, requestSid));
-            while (queue.Count > MaxPendingPerEndpoint)
-                queue.Dequeue();
+            pending.Add(new(request.ToArray(), headers, requestSid));
+            if (pending.Count > MaxPendingPerEndpoint)
+                pending.RemoveAt(0);
         }
     }
 
-    public PacketCaptureExchange? RecordResponse(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> response)
+    public PacketCaptureExchange? RecordResponse(PacketCaptureEndpoint endpoint, ReadOnlyMemory<byte> response, Guid requestId)
     {
         PendingRequest request;
         lock (gate)
         {
-            if (!pendingRequests.TryGetValue(endpoint.EndpointType, out var queue) || queue.Count == 0)
+            if (!pendingRequests.TryGetValue(endpoint.EndpointType, out var pending))
                 return null;
 
-            request = queue.Dequeue();
+            var index = pending.FindIndex(candidate => candidate.Headers.RequestId == requestId);
+            if (index < 0)
+                return null;
+
+            request = pending[index];
+            pending.RemoveAt(index);
         }
 
         var responseCopy = response.ToArray();

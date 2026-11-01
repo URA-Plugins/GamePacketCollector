@@ -2,7 +2,7 @@
 
 GamePacketCollector 是 URA 的游戏包采集插件,捕获高价值游戏 request-response raw 包并上传到 URACloud GamePackets。
 
-插件通过唯一的程序化 analyzer API，以 `Register<ReadOnlyMemory<byte>>` 分别注册 request/response；endpoint 集合由 exact 与不跨 `/` 的 wildcard pattern 在 Host catalog 中展开。插件采集原始 MessagePack bytes，不解析 response payload。插件按 endpoint FIFO 配对 request/response，生成完整 HTTP exchange 后上传。当前采集类别:
+插件通过唯一的程序化 analyzer API，以 `Register<ReadOnlyMemory<byte>>` 分别注册 request/response；endpoint 集合由 exact 与不跨 `/` 的 wildcard pattern 在 Host catalog 中展开。插件采集原始 MessagePack bytes，不解析 response payload。插件按 endpoint 和 `RequestId` 配对 request/response，生成完整 HTTP exchange 后上传。每个 endpoint 最多保留 8 条待匹配请求；未找到对应请求的响应不上传，也不消费其他请求。当前采集类别:
 
 - `single-mode`: 育成开始、恢复、事件、训练/行动、比赛、技能、因子、剧本专属动作、结算。
 - `room-match`: 自定义比赛房间、报名、轮询、开赛、结果、历史结果、比赛条件。
@@ -26,6 +26,8 @@ pending 文件是 URACloud `/GamePackets` 的上传体:
 `appVersion`、`gameDataVersion`、`viewerId` 来自宿主传入的真实 `X-Hachimi-*` request headers，用于生成 `packetIdemKey`；缺失时该包 fail fast。
 
 ## 构建
+
+要求 Host SDK 和运行中的 Host 至少为 `2026.11.1.2`；转发器须在请求及对应响应中提供相同的 `X-Hachimi-Request-Id`。
 
 ```powershell
 git -c core.longpaths=true submodule update --init --recursive
